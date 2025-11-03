@@ -1,0 +1,8 @@
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "uzman-rapor-gui"
+version = "0.5.6.1"
+dependencies = ["PySide6>=6.7","pandas>=2.2","numpy>=1.26","openpyxl>=3.1","pyxlsb>=1.0","xlsxwriter>=3.2"]
