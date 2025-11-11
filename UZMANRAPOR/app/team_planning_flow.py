@@ -346,26 +346,40 @@ class TezgahPicker(QDialog):
                 r_same_tg = r.copy()
 
             if not r_same_tg.empty:
-                tz_col = self._col(r_same_tg, ["Tezgah No","Tezgah","Tezgah Numarası"])
-                r_same_tg["_kalan_ok"] = r_same_tg["_KalanMetreNorm"].apply(
-                    lambda v: 0 if (pd.notna(v) and float(v) <= self._thr) else 1
+                mask_viable = (
+                        (r_same_tg["_OpenTezgahFlag"] == True)
+                        | (
+                                pd.notna(r_same_tg["_KalanMetreNorm"])
+                                & (r_same_tg["_KalanMetreNorm"] <= self._thr)
+                        )
                 )
-                r_same_tg["_loom_no"] = r_same_tg[tz_col].apply(lambda x: (_loom_no_as_int(x) or 99999))
+                r_same_tg = r_same_tg[mask_viable].copy()
 
-                r_same_tg = r_same_tg.sort_values(
-                    by=["_kalan_ok","_loom_no"],
-                    ascending=[True, True],
-                    na_position="last"
-                )
-                part2 = r_same_tg.copy()
-                part2["_bucket"] = 2
-                parts.append(part2)
+                if not r_same_tg.empty:
+                    tz_col = self._col(r_same_tg, ["Tezgah No", "Tezgah", "Tezgah Numarası"])
+                    r_same_tg["_kalan_ok"] = r_same_tg["_KalanMetreNorm"].apply(
+                        lambda v: 0 if (pd.notna(v) and float(v) <= self._thr) else 1
+                    )
+                    r_same_tg["_loom_no"] = r_same_tg[tz_col].apply(lambda x: (_loom_no_as_int(x) or 99999))
+
+                    r_same_tg = r_same_tg.sort_values(
+                        by=["_kalan_ok", "_loom_no"],
+                        ascending=[True, True],
+                        na_position="last"
+                    )
+                    part2 = r_same_tg.copy()
+                    part2["_bucket"] = 2
+                    parts.append(part2)
 
         if parts:
             cand = pd.concat(parts, ignore_index=True)
         else:
             cand = pd.DataFrame(columns=[col_tz, "_TG_norm", "_OpenTezgahFlag", "_KalanMetreNorm", "_bucket"])
 
+        if not cand.empty:
+            # Kullanıcı, hedef tarak grubunun kendi tezgahlarının listelenmesini istemiyor.
+            cand["_TG_norm"] = cand["_TG_norm"].astype(str).str.strip()
+            cand = cand[cand["_TG_norm"] != self._target_tg_norm]
         if not cand.empty:
             cand["_open_prio"] = cand["_OpenTezgahFlag"].apply(lambda b: 0 if b else 1)
             cand["_kalan_ok"]  = cand["_KalanMetreNorm"].apply(lambda v: 0 if (pd.notna(v) and v <= self._thr) else 1)
@@ -1101,7 +1115,13 @@ class TeamPlanningFlowTab(QWidget):
             )
 
         sub = sub[sub.apply(allowed_row, axis=1)].copy()
-
+        # Her ne kadar yukarıda varsayılan False değeri versek de, bazı edge-case
+        # filtreleme adımlarından sonra kolon düşebiliyor. Böyle bir durumda
+        # KeyError almamak için burada da garanti altına alıyoruz.
+        if "_OpenTezgahFlag" not in sub.columns:
+            sub["_OpenTezgahFlag"] = False
+        if "_KalanMetreNorm" not in sub.columns:
+            sub["_KalanMetreNorm"] = pd.NA
         # AÇIK listesi
         mask_open = (sub["_OpenTezgahFlag"] == True)
         open_vals = sub.loc[mask_open, "_TZ_val"] if "_TZ_val" in sub.columns else pd.Series([], dtype=object)
@@ -1206,7 +1226,7 @@ class TeamPlanningFlowTab(QWidget):
                             except Exception:
                                 ws.write(r, c, "" if pd.isna(val) else str(val), fmt_text)
                         elif c in (ci_term, ci_hash) and pd.notna(val):
-                            dt = pd.to_datetime(val, dayfirst=True, errors="coerce")
+                            dt = pd.to_datetime(val, format="%d/%m/%Y", errors="coerce")
                             if pd.notna(dt):
                                 ws.write_datetime(r, c, dt.to_pydatetime(), fmt_date)
                             else:
