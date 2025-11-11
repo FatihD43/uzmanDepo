@@ -466,6 +466,8 @@ class TeamPlanningFlowTab(QWidget):
         self.missing_open = set()
         self.missing_soon = set()
 
+        self._can_write = True
+
         self.settings = QSettings("UZMANRAPOR", "ClientApp")
         self.flow_threshold_m = int(self.settings.value("team_flow/soon_threshold_m", 300))
 
@@ -558,6 +560,19 @@ class TeamPlanningFlowTab(QWidget):
         self._picker_open = False
 
         self.refresh_sources()
+        try:
+            can_write = bool(getattr(self.main, "has_permission", lambda *_: True)("write"))
+            self.set_write_enabled(can_write)
+        except Exception:
+            pass
+
+    def set_write_enabled(self, enabled: bool):
+        self._can_write = bool(enabled)
+        if hasattr(self, "tbl_jobs") and self.tbl_jobs is not None:
+            if self._can_write:
+                self.tbl_jobs.setToolTip("")
+            else:
+                self.tbl_jobs.setToolTip("Takım ataması yapma yetkiniz yok.")
 
     # --- yardımcı: başlığa göre daraltma ---
     def _shrink_columns_by_header(self, table: QTableView, min_width: int = 60, pad: int = 28):
@@ -856,7 +871,8 @@ class TeamPlanningFlowTab(QWidget):
 
     # ---------------- Çift tık ile atama ----------------
     def _assign_on_doubleclick(self, idx: QModelIndex):
-        if self._picker_open:
+        if not self._can_write:
+            QMessageBox.warning(self, "Yetki yok", "Takım ataması yapma yetkiniz bulunmuyor.")
             return
         self._picker_open = True
         try:

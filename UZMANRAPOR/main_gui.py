@@ -1,11 +1,16 @@
 
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 from app.gui import MainWindow
+from app.login_dialog import LoginDialog
 def main():
     app = QApplication(sys.argv)
-    win = MainWindow(); win.show()
+    login = LoginDialog()
+    if login.exec() != QDialog.Accepted or login.user is None:
+        return
+    win = MainWindow(user=login.user);
+    win.show()
     sys.exit(app.exec())
 if __name__ == "__main__":
     main()

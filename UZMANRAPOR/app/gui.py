@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QTableView, QHeaderView, QToolButton, QSizePolicy, QTextEdit, QDialog
 )
 from PySide6.QtCore import Qt, QTimer, QSettings
+from typing import Any
 
 from app.models import PandasModel
 from app.filter_proxy import MultiColumnFilterProxy
@@ -22,6 +23,69 @@ from app.usta_defteri import UstaDefteriWidget
 from app.team_planning_flow import TeamPlanningFlowTab
 from app.equipment_dialog import LoomCutEditor
 from io_layer.loaders import enrich_running_with_loom_cut, enrich_running_with_selvedge
+from app.auth import User
+def _normalize_perm_name(perm: str) -> str:
+    return str(perm or "").strip().lower()
+
+
+def _user_has_permission(user: Any, perm: str) -> bool:
+    """Saf kullanıcı nesnesi üzerinde verilen izni sorgular."""
+
+    normalized = _normalize_perm_name(perm)
+    if not normalized:
+        return True
+
+    if user is None:
+        return False
+
+    has_perm_fn = getattr(user, "has_permission", None)
+    if callable(has_perm_fn):
+        try:
+            return bool(has_perm_fn(perm))
+        except Exception:
+            pass
+
+    raw_perms = getattr(user, "permissions", None)
+    if raw_perms is None:
+        return False
+
+    try:
+        normalized_perms = {
+            _normalize_perm_name(p) for p in raw_perms if str(p).strip()
+        }
+    except Exception:
+        normalized_perms = set()
+
+    return normalized in normalized_perms or "admin" in normalized_perms
+
+
+def require_permission(window: QWidget, perm: str, message: str) -> bool:
+    """MainWindow örnekleri için güvenli izin denetimi."""
+
+    helper = getattr(window, "_require_permission", None)
+    if callable(helper):
+        try:
+            return bool(helper(perm, message))
+        except Exception:
+            pass
+
+    has_perm_fn = getattr(window, "has_permission", None)
+    if callable(has_perm_fn):
+        try:
+            if has_perm_fn(perm):
+                return True
+        except Exception:
+            pass
+
+    if _user_has_permission(getattr(window, "user", None), perm):
+        return True
+
+    try:
+        QMessageBox.warning(window, "Yetki yok", message)
+    except Exception:
+        pass
+    return False
+
 
 
 # ============================================================
@@ -213,9 +277,13 @@ class LoomListEditor(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, user: User | None = None):
         super().__init__()
-        self.setWindowTitle("UZMAN RAPOR — v6.4 (Kuşbakışı)")
+        if user is None:
+            raise ValueError("MainWindow requires an authenticated user")
+
+        self.user = user
+        self.setWindowTitle(f"UZMAN RAPOR — v6.4 (Kuşbakışı) • {self.user.username}")
         self.resize(1450, 900)
 
         # Sabit uygulama saat dilimi (İstanbul)
@@ -247,6 +315,43 @@ class MainWindow(QMainWindow):
 
         # Açılışta son snapshot'ları geri yükle (BUTON BAYRAKLARINI ETKİLEMEZ)
         self._restore_last_state()
+        apply_permissions = getattr(self, "_apply_permissions", None)
+        if callable(apply_permissions):
+            apply_permissions()
+
+
+        # -------------------------
+        # Yetki kontrol yardımcıları
+        # -------------------------
+        def has_permission(self, perm: str) -> bool:
+            return _user_has_permission(self.user, perm)
+
+        def _require_permission(self, perm: str, message: str) -> bool:
+            if _user_has_permission(self.user, perm):
+                return True
+            QMessageBox.warning(self, "Yetki yok", message)
+            return False
+
+        def _apply_permissions(self):
+            can_write = self.has_permission("write")
+            can_read = self.has_permission("read")
+
+            if hasattr(self, "btn_plan"):
+                self.btn_plan.setEnabled(can_write)
+            if hasattr(self, "btn_notes"):
+                self.btn_notes.setEnabled(can_write)
+            if hasattr(self, "btn_empty"):
+                self.btn_empty.setEnabled(can_write)
+            if hasattr(self, "btn_blocked"):
+                self.btn_blocked.setEnabled(can_write)
+            if hasattr(self, "btn_cut_edit"):
+                self.btn_cut_edit.setEnabled(can_write)
+            if hasattr(self, "btn_load_dinamik"):
+                self.btn_load_dinamik.setEnabled(can_read)
+            if hasattr(self, "btn_load_running"):
+                self.btn_load_running.setEnabled(can_read)
+            if hasattr(self, "team_flow"):
+                self.team_flow.set_write_enabled(can_write)
 
     # -------------------------
     # DÜĞÜM SEKME
@@ -258,24 +363,27 @@ class MainWindow(QMainWindow):
         # Üst bar
         top = QHBoxLayout()
         btn_clear = QPushButton("Filtreleri Kaldır"); btn_clear.clicked.connect(self.clear_all_filters)
-        btn_load = QPushButton("Dinamik Rapor Yükle"); btn_load.clicked.connect(self.load_dinamik)
-        btn_plan = QPushButton("Planlama"); btn_plan.clicked.connect(self.open_planlama)
-        btn_notes = QPushButton("NOTLAR"); btn_notes.clicked.connect(self.open_notes)
+        self.btn_load_dinamik = QPushButton("Dinamik Rapor Yükle");
+        self.btn_load_dinamik.clicked.connect(self.load_dinamik)
+        self.btn_plan = QPushButton("Planlama");
+        self.btn_plan.clicked.connect(self.open_planlama)
+        self.btn_notes = QPushButton("NOTLAR");
+        self.btn_notes.clicked.connect(self.open_notes)
         top.addWidget(btn_clear)
-        top.addWidget(btn_load)
-        top.addWidget(btn_plan)
-        top.addWidget(btn_notes)
+        top.addWidget(self.btn_load_dinamik)
+        top.addWidget(self.btn_plan)
+        top.addWidget(self.btn_notes)
 
         # **YENİ**: Arızalı/Bakımda ve Boş Göster listeleri düğmeleri
-        btn_empty = QPushButton("Boş Gösterilecek Tezgahlar")
-        btn_empty.setToolTip("Bu listedeki tezgahlar boş kabul edilir; planlamada görünmez.")
-        btn_empty.clicked.connect(self._edit_empty_looms)
-        top.addWidget(btn_empty)
+        self.btn_empty = QPushButton("Boş Gösterilecek Tezgahlar")
+        self.btn_empty.setToolTip("Bu listedeki tezgahlar boş kabul edilir; planlamada görünmez.")
+        self.btn_empty.clicked.connect(self._edit_empty_looms)
+        top.addWidget(self.btn_empty)
 
-        btn_blocked = QPushButton("Arızalı/Bakımda Tezgahlar")
-        btn_blocked.setToolTip("Bu listedeki tezgahlara iş verilemez; planlamada görünmez.")
-        btn_blocked.clicked.connect(self._edit_blocked_looms)
-        top.addWidget(btn_blocked)
+        self.btn_blocked = QPushButton("Arızalı/Bakımda Tezgahlar")
+        self.btn_blocked.setToolTip("Bu listedeki tezgahlara iş verilemez; planlamada görünmez.")
+        self.btn_blocked.clicked.connect(self._edit_blocked_looms)
+        top.addWidget(self.btn_blocked)
 
         top.addStretch(1)
 
@@ -350,6 +458,8 @@ class MainWindow(QMainWindow):
         return w
 
     def _edit_blocked_looms(self):
+        if not require_permission(self, "write", "Arızalı/Bakımda listesini düzenleme yetkiniz yok."):
+            return
         dlg = LoomListEditor("Arızalı/Bakımda Tezgahlar", "looms/blocked", parent=self)
         if dlg.exec():
             QMessageBox.information(self, "Bilgi",
@@ -359,6 +469,8 @@ class MainWindow(QMainWindow):
             self._refresh_kusbakisi()
 
     def _edit_empty_looms(self):
+        if not require_permission(self, "write", "Boş tezgah listesinde değişiklik yapma yetkiniz yok."):
+            return
         dlg = LoomListEditor("Boş Gösterilecek Tezgahlar", "looms/empty", parent=self)
         if dlg.exec():
             QMessageBox.information(self, "Bilgi",
@@ -429,6 +541,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._sync_filter_scroll(self.tbl, self.dugum_scroll))
 
     def load_dinamik(self):
+        if not require_permission(self, "read", "Dinamik raporu yüklemek için okuma yetkisi gerekiyor."):
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Dinamik Rapor Seç", "", "Excel Files (*.xlsx *.xlsb);;All Files (*)")
         if not path:
             return
@@ -465,6 +579,7 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "team_flow"):
             self.team_flow.refresh_sources()
+            self.team_flow.set_write_enabled(self.has_permission("write"))
 
     def _refresh_dugum_view(self,
                             group_filter: str | None = None,
@@ -511,6 +626,8 @@ class MainWindow(QMainWindow):
     # PLANLAMA DİYALOĞU
     # -------------------------
     def open_planlama(self):
+        if not require_permission(self, "write", "Planlama ekranını açma yetkiniz yok."):
+            return
         # şartlar: Dinamik ve Running yüklü olmalı (veri olarak)
         if self.df_dinamik_full is None:
             QMessageBox.warning(self, "Uyarı", "Önce Dinamik raporu yükleyin.")
@@ -556,6 +673,8 @@ class MainWindow(QMainWindow):
     # NOTES: diyalog ve uygulama
     # -------------------------
     def open_notes(self):
+        if not require_permission(self, "write", "Not kurallarında değişiklik yapma yetkiniz yok."):
+            return
         if self.df_dinamik_full is None or self.df_dinamik_full.empty:
             QMessageBox.information(self, "Bilgi", "Önce Dinamik raporu yükleyin."); return
 
@@ -669,11 +788,11 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         btn_clear_run = QPushButton("Filtreleri Kaldır")
         btn_clear_run.clicked.connect(self.clear_all_filters)
-        btn = QPushButton("Running Orders Yükle")
-        btn.clicked.connect(self.load_running)
+        self.btn_load_running = QPushButton("Running Orders Yükle")
+        self.btn_load_running.clicked.connect(self.load_running)
 
         top.addWidget(btn_clear_run)
-        top.addWidget(btn)
+        top.addWidget(self.btn_load_running)
         top.addStretch(1)
 
         # >>> YENİ: Kesim Tipi editörü butonu
@@ -748,6 +867,8 @@ class MainWindow(QMainWindow):
         return w
 
     def _open_loom_cut_editor(self):
+        if not require_permission(self, "write", "Kesim tipi düzenleyicisini açma yetkiniz yok."):
+            return
         try:
             dlg = LoomCutEditor(self)
             dlg.exec()
@@ -830,6 +951,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._sync_filter_scroll(self.tbl_run, self.run_scroll))
 
     def load_running(self):
+        if not require_permission(self, "read", "Running Orders dosyasını yüklemek için okuma yetkisi gerekiyor."):
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Running Orders Seç", "", "Excel Files (*.xlsx);;All Files (*)")
         if not path:
             return
@@ -892,6 +1015,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Hata", f"Running orders yüklenemedi:\n{e}")
         if hasattr(self, "team_flow"):
             self.team_flow.refresh_sources()
+            self.team_flow.set_write_enabled(self.has_permission("write"))
 
     # -------------------------
     # KUŞBAKIŞI SEKME

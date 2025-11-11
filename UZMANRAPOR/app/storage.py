@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-import os, json, sqlite3, re
+import os, json, sqlite3, re, secrets, hashlib
 from datetime import datetime
 from zoneinfo import ZoneInfo  # <-- Istanbul TZ
 import pandas as pd
@@ -13,6 +13,7 @@ META_PATH  = APP_DIR / "meta.json"
 DINAMIK_SNAPSHOT = APP_DIR / "dinamik.pkl"
 RUNNING_SNAPSHOT = APP_DIR / "running.pkl"
 USERCFG_PATH = APP_DIR / "user.json"
+USERS_DB_PATH = APP_DIR / "users.json"
 
 
 # ---------- Notes rules (kalıcı) ----------
@@ -122,9 +123,58 @@ def set_username_default(name: str) -> None:
             except Exception:
                 pass
         with open(USERCFG_PATH, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
+                    json.dump(d, f, ensure_ascii=False, indent=2)
     except Exception:
-        pass
+            pass
+
+    # ---------- Kullanıcı veritabanı (yetkilendirme) ----------
+    def hash_password(password: str, salt: str) -> str:
+        """Verilen parolayı salt ile SHA-256 kullanarak karmalar."""
+        payload = f"{salt}:{password}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def ensure_user_db() -> None:
+        """users.json dosyasını yoksa oluşturur (admin/admin varsayılanıyla)."""
+        if USERS_DB_PATH.exists():
+            return
+
+        salt = secrets.token_hex(16)
+        default_user = {
+            "username": "admin",
+            "salt": salt,
+            "password_hash": hash_password("admin", salt),
+            "permissions": ["admin", "read", "write"],
+        }
+        data = {"users": [default_user]}
+        try:
+            with open(USERS_DB_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def load_users() -> list[dict]:
+        """users.json içindeki kullanıcı kayıtlarını döndürür."""
+        ensure_user_db()
+        try:
+            with open(USERS_DB_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                users = data.get("users", [])
+                if isinstance(users, list):
+                    return users
+        except Exception:
+            pass
+        return []
+
+    def save_users(users: list[dict]) -> None:
+        """Kullanıcı listesini users.json içine yazar."""
+        ensure_user_db()
+        payload = {"users": users or []}
+        try:
+            with open(USERS_DB_PATH, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
 
 # === Kesim Tipi (ISAVER/ROTOCUT) ve Süs Kenar (Kök Tip) kalıcı sözlükleri ===
