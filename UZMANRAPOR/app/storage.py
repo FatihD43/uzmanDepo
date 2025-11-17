@@ -1,9 +1,8 @@
 from __future__ import annotations
-from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from typing import List, Dict
 
-import os
 import json
 import re
 import secrets
@@ -12,17 +11,8 @@ import io
 
 import pandas as pd
 import pyodbc
+import zlib
 
-# ============================================================
-#  GENEL YOLLAR (Kişisel ayarlar – her PC için)
-# ============================================================
-
-APP_DIR = Path.home() / ".uzman_rapor"
-APP_DIR.mkdir(parents=True, exist_ok=True)
-
-RULES_PATH = APP_DIR / "notes_rules.json"
-META_PATH = APP_DIR / "meta.json"
-USERCFG_PATH = APP_DIR / "user.json"
 
 # ============================================================
 #  SQL SERVER BAĞLANTISI
@@ -43,87 +33,153 @@ def _sql_conn():
 
 
 # ============================================================
-#  NOT KURALLARI (kalıcı, ama yerel JSON'da kalsın)
+#  APP META TABLOSU (GENEL ANAHTAR/DEĞER)
+#    - last_update       : planlama güncellik zamanı (ISO datetime)
+#    - notes_rules       : not kuralları listesi (JSON)
+#    - last_username     : en son giriş yapan kullanıcı adı
+# ============================================================
+
+def _ensure_meta_table() -> None:
+    """
+    AppMeta tablosunun varlığını garanti eder.
+
+    AppMeta:
+      MetaKey   NVARCHAR(50) PRIMARY KEY
+      MetaValue NVARCHAR(MAX) NULL
+      UpdatedAt DATETIME2(0) NOT NULL DEFAULT SYSUTCDATETIME()
+    """
+    sql = """
+    IF OBJECT_ID('dbo.AppMeta', 'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.AppMeta (
+            MetaKey   nvarchar(50) NOT NULL PRIMARY KEY,
+            MetaValue nvarchar(max) NULL,
+            UpdatedAt datetime2(0) NOT NULL
+                CONSTRAINT DF_AppMeta_UpdatedAt DEFAULT (SYSUTCDATETIME())
+        );
+    END
+    """
+    with _sql_conn() as c:
+        cur = c.cursor()
+        cur.execute(sql)
+        c.commit()
+
+
+def _meta_get(key: str) -> str | None:
+    """AppMeta içinden tek bir anahtarın değerini döner."""
+    _ensure_meta_table()
+    with _sql_conn() as c:
+        cur = c.cursor()
+        cur.execute("SELECT MetaValue FROM dbo.AppMeta WHERE MetaKey = ?;", (key,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    return row[0]
+
+
+def _meta_set(key: str, value: str | None) -> None:
+    """AppMeta içine tek anahtar/değer yazar (upsert)."""
+    _ensure_meta_table()
+    with _sql_conn() as c:
+        cur = c.cursor()
+        sql = """
+        MERGE dbo.AppMeta AS target
+        USING (SELECT ? AS MetaKey) AS src
+            ON target.MetaKey = src.MetaKey
+        WHEN MATCHED THEN
+            UPDATE SET MetaValue = ?, UpdatedAt = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN
+            INSERT (MetaKey, MetaValue, UpdatedAt)
+            VALUES (src.MetaKey, ?, SYSUTCDATETIME());
+        """
+        cur.execute(sql, (key, value, value))
+        c.commit()
+
+
+# ============================================================
+#  NOT KURALLARI (Artık SQL: AppMeta.notes_rules)
 # ============================================================
 
 def load_rules() -> list[dict]:
-    if RULES_PATH.exists():
-        try:
-            with open(RULES_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
+    """
+    Not kurallarını SQL'den okur.
+    AppMeta.MetaKey = 'notes_rules' içinde JSON list olarak tutulur.
+    """
+    raw = _meta_get("notes_rules")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
     return []
 
 
 def save_rules(rules: list[dict]) -> None:
+    """
+    Not kurallarını SQL'e yazar.
+    """
     try:
-        with open(RULES_PATH, "w", encoding="utf-8") as f:
-            json.dump(rules or [], f, ensure_ascii=False, indent=2)
+        payload = json.dumps(rules or [], ensure_ascii=False)
     except Exception:
-        pass
+        # JSON'e çevrilemiyorsa kaydetmeyelim
+        return
+    _meta_set("notes_rules", payload)
 
 
 # ============================================================
 #  SON GÜNCELLEME (Planlama tıklanınca kaydedilen zaman)
+#    - AppMeta.MetaKey = 'last_update'
 # ============================================================
 
 def load_last_update() -> datetime | None:
-    if META_PATH.exists():
-        try:
-            with open(META_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            iso = data.get("last_update_iso")
-            if iso:
-                dt = datetime.fromisoformat(iso)
-                # naive ise İstanbul TZ ata
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=ZoneInfo("Europe/Istanbul"))
-                return dt
-        except Exception:
-            pass
-    return None
+    raw = _meta_get("last_update")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+        # naive ise İstanbul TZ ata
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("Europe/Istanbul"))
+        return dt
+    except Exception:
+        return None
 
 
 def save_last_update(dt: datetime) -> None:
-    try:
-        # dt naive ise İstanbul TZ'li kabul et
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("Europe/Istanbul"))
-        meta = {"last_update_iso": dt.isoformat()}
-        if META_PATH.exists():
-            try:
-                with open(META_PATH, "r", encoding="utf-8") as f:
-                    cur = json.load(f)
-                if isinstance(cur, dict):
-                    cur.update(meta)
-                    meta = cur
-            except Exception:
-                pass
-        with open(META_PATH, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    # dt naive ise İstanbul TZ'li kabul et
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("Europe/Istanbul"))
+    iso = dt.isoformat()
+    _meta_set("last_update", iso)
 
 
 # ============================================================
 #  SNAPSHOT (Dinamik & Running) – SQL TABLOSU
 # ============================================================
 
+# ============================================================
+#  SNAPSHOT (Dinamik & Running) – SQL TABLOSU (HEX STRING)
+# ============================================================
+
+# ============================================================
+#  SNAPSHOT (Dinamik & Running) – SQL TABLOSU (HEX + ZLIB)
+# ============================================================
+
 def _ensure_snapshot_table() -> None:
     """
     Snapshots tablosu:
-      Name: 'dinamik' veya 'running' vb
-      Data: varbinary(max) (pandas pickle)
+      Name   : 'dinamik' veya 'running' vb
+      DataHex: pandas pickle'ın ZLIB sıkıştırılmış hex string hâli (nvarchar(max))
     """
     sql = """
     IF OBJECT_ID('dbo.Snapshots', 'U') IS NULL
     BEGIN
         CREATE TABLE dbo.Snapshots (
             Name      nvarchar(50) NOT NULL PRIMARY KEY,
-            Data      varbinary(max) NULL,
+            DataHex   nvarchar(max) NULL,
             UpdatedAt datetime2 NOT NULL CONSTRAINT DF_Snapshots_UpdatedAt DEFAULT (sysdatetime())
         );
     END
@@ -134,12 +190,13 @@ def _ensure_snapshot_table() -> None:
             cur.execute(sql)
             c.commit()
     except Exception:
+        # tablo yoksa sonraki save çağrısında tekrar denenecek
         pass
 
 
 def save_df_snapshot(df: pd.DataFrame | None, which: str) -> None:
     """
-    Dinamik / Running DataFrame'lerini SQL'e pickle olarak yazar.
+    Dinamik / Running DataFrame'lerini SQL'e pickle + ZLIB + HEX olarak yazar.
     which: 'dinamik' veya 'running' vb.
     """
     if df is None:
@@ -148,22 +205,34 @@ def save_df_snapshot(df: pd.DataFrame | None, which: str) -> None:
     _ensure_snapshot_table()
 
     try:
+        # 1) DataFrame -> pickle bytes
         buf = io.BytesIO()
         df.to_pickle(buf)
-        data_bytes = buf.getvalue()
+        raw_bytes = buf.getvalue()
+
+        # 2) ZLIB ile sıkıştır
+        compressed = zlib.compress(raw_bytes, level=9)
+
+        # 3) HEX string'e çevir
+        hex_str = compressed.hex()
+
+        print(
+            f"[SNAPSHOT] {which}: {len(df)} satır kaydedildi, "
+            f"raw={len(raw_bytes)} byte, compressed={len(compressed)} byte"
+        )
 
         with _sql_conn() as c:
             cur = c.cursor()
             # Önce var olan kaydı sil
             cur.execute("DELETE FROM dbo.Snapshots WHERE Name = ?;", (which,))
-            # Sonra yeni kaydı ekle
+            # Sonra yeni kaydı ekle (hex string olarak)
             cur.execute(
-                "INSERT INTO dbo.Snapshots (Name, Data) VALUES (?, ?);",
-                (which, pyodbc.Binary(data_bytes)),
+                "INSERT INTO dbo.Snapshots (Name, DataHex) VALUES (?, ?);",
+                (which, hex_str),
             )
             c.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[SNAPSHOT] {which}: KAYIT HATASI -> {e!r}")
 
 
 def load_df_snapshot(which: str) -> pd.DataFrame | None:
@@ -176,55 +245,52 @@ def load_df_snapshot(which: str) -> pd.DataFrame | None:
     try:
         with _sql_conn() as c:
             cur = c.cursor()
-            cur.execute("SELECT Data FROM dbo.Snapshots WHERE Name = ?;", (which,))
+            cur.execute("SELECT DataHex FROM dbo.Snapshots WHERE Name = ?;", (which,))
             row = cur.fetchone()
 
         if not row or row[0] is None:
             return None
 
-        buf = io.BytesIO(row[0])
+        hex_str = row[0]
+
+        # 1) HEX -> sıkıştırılmış bytes
+        compressed = bytes.fromhex(hex_str)
+        # 2) ZLIB decompress -> raw pickle bytes
+        raw_bytes = zlib.decompress(compressed)
+
+        buf = io.BytesIO(raw_bytes)
         df = pd.read_pickle(buf)
         if isinstance(df, pd.DataFrame):
             return df
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[SNAPSHOT] {which}: YÜKLEME HATASI -> {e!r}")
 
     return None
 
-
 # ============================================================
-#  KULLANICI VARSAYILANI (Sadece bu PC için – yerel JSON)
+#  KULLANICI VARSAYILANI (login ekranındaki son kullanıcı)
+#    - AppMeta.MetaKey = 'last_username'
 # ============================================================
 
 def get_username_default() -> str:
-    if USERCFG_PATH.exists():
-        try:
-            with open(USERCFG_PATH, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            u = d.get("username")
-            if u:
-                return str(u)
-        except Exception:
-            pass
+    """
+    Login ekranında görünen varsayılan kullanıcı adı.
+    Artık SQL'den (AppMeta.last_username) okunuyor.
+    """
+    val = _meta_get("last_username")
+    if val:
+        return str(val)
     return "Anonim"
 
 
 def set_username_default(name: str) -> None:
-    try:
-        d = {"username": name}
-        if USERCFG_PATH.exists():
-            try:
-                with open(USERCFG_PATH, "r", encoding="utf-8") as f:
-                    cur = json.load(f)
-                if isinstance(cur, dict):
-                    cur.update(d)
-                    d = cur
-            except Exception:
-                pass
-        with open(USERCFG_PATH, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    """
+    Giriş yapıldığında en son kullanılan kullanıcı adını yazar.
+    """
+    name = (name or "").strip()
+    if not name:
+        return
+    _meta_set("last_username", name)
 
 
 # ============================================================
@@ -247,7 +313,7 @@ def _ensure_app_users_table() -> None:
             PasswordHash nvarchar(64) NOT NULL,
             Permissions  nvarchar(max) NULL,      -- JSON (örn: ["admin","read","write"])
             IsActive     bit NOT NULL CONSTRAINT DF_AppUsers_IsActive DEFAULT (1),
-            CreatedAt    datetime2 NOT NULL CONSTRAINT DF_AppUsers_CreatedAt DEFAULT (sysdatetime())
+            CreatedAt    datetime2(0) NOT NULL CONSTRAINT DF_AppUsers_CreatedAt DEFAULT (SYSUTCDATETIME())
         );
     END
     """
@@ -326,12 +392,11 @@ def load_users() -> list[dict]:
             created_at = row[5]
 
             # permissions JSON mu string mi?
-            perms: list[str] | str
             if isinstance(perms_raw, str):
                 try:
                     tmp = json.loads(perms_raw)
                     if isinstance(tmp, list):
-                        perms = tmp
+                        perms: list[str] | str = tmp
                     else:
                         perms = perms_raw
                 except Exception:
@@ -624,7 +689,7 @@ def save_type_selvedge_map(d: dict) -> None:
 
 def load_usta_dataframe(sqlite_path: str | None = None) -> pd.DataFrame:
     """
-    Eski API'yi bozmamak için basit bir SQL türevi.
+    Eski API'yi bozmamak için SQL türevi.
     _ts: datetime, _what: 'DÜĞÜM' / 'TAKIM', _dir: şimdilik boş string.
     """
     try:
