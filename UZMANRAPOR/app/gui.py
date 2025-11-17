@@ -24,6 +24,8 @@ from app.team_planning_flow import TeamPlanningFlowTab
 from app.equipment_dialog import LoomCutEditor
 from io_layer.loaders import enrich_running_with_loom_cut, enrich_running_with_selvedge
 from app.auth import User
+
+
 def _normalize_perm_name(perm: str) -> str:
     return str(perm or "").strip().lower()
 
@@ -87,7 +89,6 @@ def require_permission(window: QWidget, perm: str, message: str) -> bool:
     return False
 
 
-
 # ============================================================
 # RUNNING ORDERS NORMALİZASYON BLOĞU (tek noktadan düzeltme)
 # ============================================================
@@ -127,9 +128,11 @@ def _parse_number_loose(x):
     except Exception:
         return pd.NA
 
+
 def _extract_nums_keep_decimal(text: str):
     """Tarak grubu normalize için: ondalığı koruyarak sayıları çıkar (virgül -> nokta)."""
-    if text is None: return []
+    if text is None:
+        return []
     nums = re.findall(r"[\d]+(?:[.,]\d+)?", str(text))
     out = []
     for n in nums:
@@ -138,6 +141,7 @@ def _extract_nums_keep_decimal(text: str):
             n = n.split(".", 1)[0]
         out.append(n)
     return out
+
 
 def _norm_tarak_generic(val) -> str:
     """Dinamik/Running fark etmez: 'a/b/c' (ilk 3 sayı) şeklinde normalize anahtar."""
@@ -148,6 +152,7 @@ def _norm_tarak_generic(val) -> str:
         return str(val).strip()
     return "/".join(parts[:3])
 
+
 def _detect_94_row(row):
     """Running satırında 94 / 'Sipariş Yok' tespiti (kolon adı bağımsız)."""
     for c in row.index:
@@ -155,6 +160,7 @@ def _detect_94_row(row):
         if "SİPARİŞ YOK" in u or "SIPARIS YOK" in u or u == "94" or " 94" in u:
             return True
     return False
+
 
 def normalize_df_running(df_running: pd.DataFrame) -> pd.DataFrame:
     """Running Orders df'sine kanonik kolonlar ekler/yeniler:
@@ -166,7 +172,7 @@ def normalize_df_running(df_running: pd.DataFrame) -> pd.DataFrame:
         return df_running
 
     # 1) Kalan -> _KalanMetreNorm
-    kalan_cols = ["Kalan","Kalan Mt","Kalan Metre","Kalan_Metre","_KalanMetre"]
+    kalan_cols = ["Kalan", "Kalan Mt", "Kalan Metre", "Kalan_Metre", "_KalanMetre"]
     kal_col = next((c for c in kalan_cols if c in df_running.columns), None)
     if kal_col:
         df_running["_KalanMetreNorm"] = df_running[kal_col].apply(_parse_number_loose)
@@ -174,7 +180,7 @@ def normalize_df_running(df_running: pd.DataFrame) -> pd.DataFrame:
         df_running["_KalanMetreNorm"] = pd.NA
 
     # 2) Tarak Grubu normalize -> _TG_norm
-    tg_col = next((c for c in ["Tarak Grubu","Tarak","TarakGrubu"] if c in df_running.columns), None)
+    tg_col = next((c for c in ["Tarak Grubu", "Tarak", "TarakGrubu"] if c in df_running.columns), None)
     if tg_col:
         df_running["_TG_norm"] = df_running[tg_col].astype(str).apply(_norm_tarak_generic)
     else:
@@ -184,7 +190,7 @@ def normalize_df_running(df_running: pd.DataFrame) -> pd.DataFrame:
     df_running["_OpenTezgahFlag"] = df_running.apply(_detect_94_row, axis=1)
 
     # 4) Durum normalizasyonu (Bitti kontrolü)
-    durum_col = next((c for c in ["Durum","Durumu","Durum Açıklaması","Durum Tanım"] if c in df_running.columns), None)
+    durum_col = next((c for c in ["Durum", "Durumu", "Durum Açıklaması", "Durum Tanım"] if c in df_running.columns), None)
     if durum_col:
         def _is_bitti(val: object) -> bool:
             s = str(val or "").strip().upper()
@@ -197,6 +203,7 @@ def normalize_df_running(df_running: pd.DataFrame) -> pd.DataFrame:
     df_running["_OpenTezgahFlag"] = df_running["_OpenTezgahFlag"].astype(bool) | bitti_series.astype(bool)
 
     return df_running
+
 
 # ============================================================
 # **YENİ**: Tezgah listesi düzenleyici dialog (Arızalı/Bakımda & Boş Göster)
@@ -248,7 +255,10 @@ class LoomListEditor(QDialog):
 
         # birleştir ve sıralı/benzersiz yap
         try:
-            all_nums = sorted({*(q_tokens or []), *[str(x) for x in (extra or [])]}, key=lambda s: int(re.findall(r"\d+", s)[0]))
+            all_nums = sorted(
+                {*(q_tokens or []), *[str(x) for x in (extra or [])]},
+                key=lambda s: int(re.findall(r"\d+", s)[0])
+            )
         except Exception:
             all_nums = list({*(q_tokens or []), *[str(x) for x in (extra or [])]})
         self.txt.setPlainText(", ".join(all_nums))
@@ -315,43 +325,48 @@ class MainWindow(QMainWindow):
 
         # Açılışta son snapshot'ları geri yükle (BUTON BAYRAKLARINI ETKİLEMEZ)
         self._restore_last_state()
-        apply_permissions = getattr(self, "_apply_permissions", None)
-        if callable(apply_permissions):
-            apply_permissions()
 
+        # Başlangıçta kullanıcının yetkisine göre butonları ayarla
+        self._apply_permissions()
 
-        # -------------------------
-        # Yetki kontrol yardımcıları
-        # -------------------------
-        def has_permission(self, perm: str) -> bool:
-            return _user_has_permission(self.user, perm)
+    # -------------------------
+    # Yetki kontrol yardımcıları
+    # -------------------------
+    def has_permission(self, perm: str) -> bool:
+        """Aktif kullanıcı için izin kontrolü."""
+        return _user_has_permission(self.user, perm)
 
-        def _require_permission(self, perm: str, message: str) -> bool:
-            if _user_has_permission(self.user, perm):
-                return True
-            QMessageBox.warning(self, "Yetki yok", message)
-            return False
+    def _require_permission(self, perm: str, message: str) -> bool:
+        """UI'den çağrılan izin denetimi (mesaj kutusu içerir)."""
+        if self.has_permission(perm):
+            return True
+        QMessageBox.warning(self, "Yetki yok", message)
+        return False
 
-        def _apply_permissions(self):
-            can_write = self.has_permission("write")
-            can_read = self.has_permission("read")
+    def _apply_permissions(self) -> None:
+        """Kullanıcının yetkilerine göre butonları etkin/pasif yap."""
+        can_write = self.has_permission("write")
+        can_read = self.has_permission("read")
 
-            if hasattr(self, "btn_plan"):
-                self.btn_plan.setEnabled(can_write)
-            if hasattr(self, "btn_notes"):
-                self.btn_notes.setEnabled(can_write)
-            if hasattr(self, "btn_empty"):
-                self.btn_empty.setEnabled(can_write)
-            if hasattr(self, "btn_blocked"):
-                self.btn_blocked.setEnabled(can_write)
-            if hasattr(self, "btn_cut_edit"):
-                self.btn_cut_edit.setEnabled(can_write)
-            if hasattr(self, "btn_load_dinamik"):
-                self.btn_load_dinamik.setEnabled(can_read)
-            if hasattr(self, "btn_load_running"):
-                self.btn_load_running.setEnabled(can_read)
-            if hasattr(self, "team_flow"):
+        if hasattr(self, "btn_plan"):
+            self.btn_plan.setEnabled(can_write)
+        if hasattr(self, "btn_notes"):
+            self.btn_notes.setEnabled(can_write)
+        if hasattr(self, "btn_empty"):
+            self.btn_empty.setEnabled(can_write)
+        if hasattr(self, "btn_blocked"):
+            self.btn_blocked.setEnabled(can_write)
+        if hasattr(self, "btn_cut_edit"):
+            self.btn_cut_edit.setEnabled(can_write)
+        if hasattr(self, "btn_load_dinamik"):
+            self.btn_load_dinamik.setEnabled(can_read)
+        if hasattr(self, "btn_load_running"):
+            self.btn_load_running.setEnabled(can_read)
+        if hasattr(self, "team_flow"):
+            try:
                 self.team_flow.set_write_enabled(can_write)
+            except Exception:
+                pass
 
     # -------------------------
     # DÜĞÜM SEKME
@@ -362,12 +377,13 @@ class MainWindow(QMainWindow):
 
         # Üst bar
         top = QHBoxLayout()
-        btn_clear = QPushButton("Filtreleri Kaldır"); btn_clear.clicked.connect(self.clear_all_filters)
-        self.btn_load_dinamik = QPushButton("Dinamik Rapor Yükle");
+        btn_clear = QPushButton("Filtreleri Kaldır")
+        btn_clear.clicked.connect(self.clear_all_filters)
+        self.btn_load_dinamik = QPushButton("Dinamik Rapor Yükle")
         self.btn_load_dinamik.clicked.connect(self.load_dinamik)
-        self.btn_plan = QPushButton("Planlama");
+        self.btn_plan = QPushButton("Planlama")
         self.btn_plan.clicked.connect(self.open_planlama)
-        self.btn_notes = QPushButton("NOTLAR");
+        self.btn_notes = QPushButton("NOTLAR")
         self.btn_notes.clicked.connect(self.open_notes)
         top.addWidget(btn_clear)
         top.addWidget(self.btn_load_dinamik)
@@ -462,9 +478,12 @@ class MainWindow(QMainWindow):
             return
         dlg = LoomListEditor("Arızalı/Bakımda Tezgahlar", "looms/blocked", parent=self)
         if dlg.exec():
-            QMessageBox.information(self, "Bilgi",
-                                    "Arızalı/Bakımda listesi güncellendi.\n"
-                                    "Planlama penceresini yeniden açtığınızda filtre uygulanacaktır.")
+            QMessageBox.information(
+                self,
+                "Bilgi",
+                "Arızalı/Bakımda listesi güncellendi.\n"
+                "Planlama penceresini yeniden açtığınızda filtre uygulanacaktır."
+            )
             # Kuşbakışı/usta gibi görünümler varsa tercihen tazele
             self._refresh_kusbakisi()
 
@@ -473,9 +492,12 @@ class MainWindow(QMainWindow):
             return
         dlg = LoomListEditor("Boş Gösterilecek Tezgahlar", "looms/empty", parent=self)
         if dlg.exec():
-            QMessageBox.information(self, "Bilgi",
-                                    "Boş Gösterilecek listesi güncellendi.\n"
-                                    "Planlama penceresini yeniden açtığınızda filtre uygulanacaktır.")
+            QMessageBox.information(
+                self,
+                "Bilgi",
+                "Boş Gösterilecek listesi güncellendi.\n"
+                "Planlama penceresini yeniden açtığınızda filtre uygulanacaktır."
+            )
             self._refresh_kusbakisi()
 
     def _rebuild_dugum_filters(self):
@@ -514,7 +536,9 @@ class MainWindow(QMainWindow):
             edit.setPlaceholderText("filtre…")
             edit.textChanged.connect(lambda text, col=c: self.proxy.setFilterForColumn(col, text))
 
-            btn = QToolButton(); btn.setText("▼"); btn.setToolTip("Çoklu seçim filtresi")
+            btn = QToolButton()
+            btn.setText("▼")
+            btn.setToolTip("Çoklu seçim filtresi")
             btn.clicked.connect(lambda _=None, col=c: self._open_value_picker_for_dugum(col))
 
             cell = QWidget()
@@ -543,7 +567,9 @@ class MainWindow(QMainWindow):
     def load_dinamik(self):
         if not require_permission(self, "read", "Dinamik raporu yüklemek için okuma yetkisi gerekiyor."):
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Dinamik Rapor Seç", "", "Excel Files (*.xlsx *.xlsb);;All Files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Dinamik Rapor Seç", "", "Excel Files (*.xlsx *.xlsb);;All Files (*)"
+        )
         if not path:
             return
         try:
@@ -565,7 +591,10 @@ class MainWindow(QMainWindow):
             self._update_usta_sources()
 
             src = str(df.get("_LeventSource", "")).strip()
-            msg = "Dinamik Rapor Yüklendi.\n\nŞimdi Vardiya Online sekmesindeki “Running Orders” dosyasını yükleyin."
+            msg = (
+                "Dinamik Rapor Yüklendi.\n\n"
+                "Şimdi Vardiya Online sekmesindeki “Running Orders” dosyasını yükleyin."
+            )
             QMessageBox.information(self, "Bilgi", msg)
 
             # >>> GÜNCELLİK: butondan yüklendi bayrağı
@@ -581,11 +610,13 @@ class MainWindow(QMainWindow):
             self.team_flow.refresh_sources()
             self.team_flow.set_write_enabled(self.has_permission("write"))
 
-    def _refresh_dugum_view(self,
-                            group_filter: str | None = None,
-                            category_filter: str | None = None,
-                            only_with_levent_digits: bool = False,
-                            rebuild_filters: bool = True):
+    def _refresh_dugum_view(
+        self,
+        group_filter: str | None = None,
+        category_filter: str | None = None,
+        only_with_levent_digits: bool = False,
+        rebuild_filters: bool = True
+    ):
         df = self.df_dinamik_full
         if df is None:
             return
@@ -609,17 +640,23 @@ class MainWindow(QMainWindow):
         self.model.set_df(view_for_ui)
 
         # 1) autosize
-        QTimer.singleShot(0, lambda: self._autosize_columns(
-            self.tbl,
-            getattr(self, "_dugum_filter_cells", []),
-            self.dugum_filter_bar,
-            self.dugum_scroll
-        ))
+        QTimer.singleShot(
+            0,
+            lambda: self._autosize_columns(
+                self.tbl,
+                getattr(self, "_dugum_filter_cells", []),
+                self.dugum_filter_bar,
+                self.dugum_scroll
+            )
+        )
         # 2) filtre barını yeniden kur
         if rebuild_filters:
             QTimer.singleShot(0, self._rebuild_dugum_filters)
         # 3) ince ayar
-        QTimer.singleShot(0, lambda: self._sync_filter_widths(self.tbl, getattr(self, "_dugum_filter_cells", [])))
+        QTimer.singleShot(
+            0,
+            lambda: self._sync_filter_widths(self.tbl, getattr(self, "_dugum_filter_cells", []))
+        )
         QTimer.singleShot(0, lambda: self._sync_filter_scroll(self.tbl, self.dugum_scroll))
 
     # -------------------------
@@ -641,26 +678,32 @@ class MainWindow(QMainWindow):
         self._update_freshness_if_ready()   # (dinamik + running butonları da basıldıysa 'GÜNCEL' olur)
 
         def on_group_select(group: str, category: str):
-            self._refresh_dugum_view(group_filter=group,
-                                     category_filter=category,
-                                     only_with_levent_digits=True)
+            self._refresh_dugum_view(
+                group_filter=group,
+                category_filter=category,
+                only_with_levent_digits=True
+            )
 
         def on_assign(group: str, category: str):
             # Atama sonrası: notları tazele, görünümü tazele ve snapshot kaydet
             self._apply_notes_and_autonotes()
-            self._refresh_dugum_view(group_filter=group,
-                                     category_filter=category,
-                                     only_with_levent_digits=True,
-                                     rebuild_filters=False)
+            self._refresh_dugum_view(
+                group_filter=group,
+                category_filter=category,
+                only_with_levent_digits=True,
+                rebuild_filters=False
+            )
             storage.save_df_snapshot(self.df_dinamik_full, "dinamik")
             # Kuşbakışı tazele
             self._refresh_kusbakisi()
 
-        dlg = PlanningDialog(self.df_dinamik_full,
-                             self.df_running,
-                             on_group_select=on_group_select,
-                             on_assign=on_assign,
-                             parent=self)  # on_list_made kaldırıldı
+        dlg = PlanningDialog(
+            self.df_dinamik_full,
+            self.df_running,
+            on_group_select=on_group_select,
+            on_assign=on_assign,
+            parent=self
+        )  # on_list_made kaldırıldı
 
         if dlg.exec():
             # Genel görünüme dön + snapshot
@@ -676,7 +719,8 @@ class MainWindow(QMainWindow):
         if not require_permission(self, "write", "Not kurallarında değişiklik yapma yetkiniz yok."):
             return
         if self.df_dinamik_full is None or self.df_dinamik_full.empty:
-            QMessageBox.information(self, "Bilgi", "Önce Dinamik raporu yükleyin."); return
+            QMessageBox.information(self, "Bilgi", "Önce Dinamik raporu yükleyin.")
+            return
 
         dlg = NotesDialog(self.df_dinamik_full, self._note_rules, parent=self)
         if dlg.exec():
@@ -880,15 +924,22 @@ class MainWindow(QMainWindow):
                 self.df_running = df
                 self.model_run.set_df(df.copy())
                 self._rebuild_run_filters()
-                QTimer.singleShot(0, lambda: self._autosize_columns(
-                    self.tbl_run,
-                    getattr(self, "_run_filter_cells", []),
-                    self.run_filter_bar,
-                    self.run_scroll
-                ))
+                QTimer.singleShot(
+                    0,
+                    lambda: self._autosize_columns(
+                        self.tbl_run,
+                        getattr(self, "_run_filter_cells", []),
+                        self.run_filter_bar,
+                        self.run_scroll
+                    )
+                )
         except Exception as e:
             import traceback
-            QMessageBox.critical(self, "Hata", f"Kesim Tipi editörü açılırken hata oluştu:\n\n{traceback.format_exc()}")
+            QMessageBox.critical(
+                self,
+                "Hata",
+                f"Kesim Tipi editörü açılırken hata oluştu:\n\n{traceback.format_exc()}"
+            )
 
     def _rebuild_run_filters(self):
         self._run_filter_cells = []
@@ -908,7 +959,8 @@ class MainWindow(QMainWindow):
             pass
 
         cols = list(self.model_run._df.columns) if (
-            self.model_run is not None and self.model_run._df is not None) else []
+            self.model_run is not None and self.model_run._df is not None
+        ) else []
         header = self.tbl_run.horizontalHeader()
 
         # Başlık satırı
@@ -921,10 +973,13 @@ class MainWindow(QMainWindow):
 
         # Edit + ▼
         for c, _ in enumerate(cols):
-            edit = QLineEdit(); edit.setPlaceholderText("filtre…")
+            edit = QLineEdit()
+            edit.setPlaceholderText("filtre…")
             edit.textChanged.connect(lambda text, col=c: self.proxy_run.setFilterForColumn(col, text))
 
-            btn = QToolButton(); btn.setText("▼"); btn.setToolTip("Çoklu seçim filtresi")
+            btn = QToolButton()
+            btn.setText("▼")
+            btn.setToolTip("Çoklu seçim filtresi")
             btn.clicked.connect(lambda _=None, col=c: self._open_value_picker_for_run(col))
 
             cell = QWidget()
@@ -947,13 +1002,17 @@ class MainWindow(QMainWindow):
         self.run_filter_bar.updateGeometry()
         self.run_filter_bar.setMinimumWidth(header.length())
         QTimer.singleShot(0, lambda: self._refit_filter_area(self.run_scroll, self.run_filter_bar))
-        QTimer.singleShot(0, lambda: self._sync_filter_widths(self.tbl_run, getattr(self, "_run_filter_cells", [])))
+        QTimer.singleShot(
+            0, lambda: self._sync_filter_widths(self.tbl_run, getattr(self, "_run_filter_cells", []))
+        )
         QTimer.singleShot(0, lambda: self._sync_filter_scroll(self.tbl_run, self.run_scroll))
 
     def load_running(self):
         if not require_permission(self, "read", "Running Orders dosyasını yüklemek için okuma yetkisi gerekiyor."):
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Running Orders Seç", "", "Excel Files (*.xlsx);;All Files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Running Orders Seç", "", "Excel Files (*.xlsx);;All Files (*)"
+        )
         if not path:
             return
         try:
@@ -990,14 +1049,20 @@ class MainWindow(QMainWindow):
             # Usta Defteri tezgah listesini güncelle
             self._update_usta_sources()
 
-            QTimer.singleShot(0, lambda: self._autosize_columns(
-                self.tbl_run,
-                getattr(self, "_run_filter_cells", []),
-                self.run_filter_bar,
-                self.run_scroll
-            ))
+            QTimer.singleShot(
+                0,
+                lambda: self._autosize_columns(
+                    self.tbl_run,
+                    getattr(self, "_run_filter_cells", []),
+                    self.run_filter_bar,
+                    self.run_scroll
+                )
+            )
             QTimer.singleShot(0, self._rebuild_run_filters)
-            QTimer.singleShot(0, lambda: self._sync_filter_widths(self.tbl_run, getattr(self, "_run_filter_cells", [])))
+            QTimer.singleShot(
+                0,
+                lambda: self._sync_filter_widths(self.tbl_run, getattr(self, "_run_filter_cells", []))
+            )
             QTimer.singleShot(0, lambda: self._sync_filter_scroll(self.tbl_run, self.run_scroll))
             QTimer.singleShot(0, lambda: self._refit_filter_area(self.run_scroll, self.run_filter_bar))
 
@@ -1006,7 +1071,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Running Hazır",
-                "Running Orders Yüklendi.\n\nŞimdi “DÜĞÜM TAKIM LİSTESİ” sekmesinde Planlama yapabilirsiniz."
+                "Running Orders Yüklendi.\n\n"
+                "Şimdi “DÜĞÜM TAKIM LİSTESİ” sekmesinde Planlama yapabilirsiniz."
             )
 
             self._update_freshness_if_ready()
@@ -1027,7 +1093,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return self.kusbakisi
-
 
     def build_team_flow_tab(self):
         self.team_flow = TeamPlanningFlowTab(self)
@@ -1192,13 +1257,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         for ed in getattr(self, "dugum_filter_edits", []):
-            ed.blockSignals(True); ed.setText(""); ed.blockSignals(False)
+            ed.blockSignals(True)
+            ed.setText("")
+            ed.blockSignals(False)
 
         try:
             self.proxy_run.clearFilters()
             self.proxy_run.clearInclusions()
             for ed in getattr(self, "run_filter_edits", []):
-                ed.blockSignals(True); ed.setText(""); ed.blockSignals(False)
+                ed.blockSignals(True)
+                ed.setText("")
+                ed.blockSignals(False)
         except Exception:
             pass
 
@@ -1316,7 +1385,9 @@ class MainWindow(QMainWindow):
                 tip_col = next((c for c in ["Tip No", "Tip Kodu", "Tip", "Mamul Tipi"] if c in rdf.columns), None)
                 if tip_col:
                     rdf["KökTip"] = rdf[tip_col].astype(str).apply(
-                        lambda x: x if (x.strip() == "" or x.strip().upper().startswith("R")) else f"R{x.strip()}"
+                        lambda x: x
+                        if (x.strip() == "" or x.strip().upper().startswith("R"))
+                        else f"R{x.strip()}"
                     )
 
                 rdf = enrich_running_with_loom_cut(rdf)
@@ -1325,15 +1396,20 @@ class MainWindow(QMainWindow):
                 self.df_running = rdf
                 self.model_run.set_df(self.df_running.copy())
                 self._rebuild_run_filters()
-                QTimer.singleShot(0, lambda: self._autosize_columns(
-                    self.tbl_run,
-                    getattr(self, "_run_filter_cells", []),
-                    self.run_filter_bar,
-                    self.run_scroll
-                ))
+                QTimer.singleShot(
+                    0,
+                    lambda: self._autosize_columns(
+                        self.tbl_run,
+                        getattr(self, "_run_filter_cells", []),
+                        self.run_filter_bar,
+                        self.run_scroll
+                    )
+                )
                 QTimer.singleShot(0, self._rebuild_run_filters)
-                QTimer.singleShot(0, lambda: self._sync_filter_widths(self.tbl_run,
-                                                                      getattr(self, "_run_filter_cells", [])))
+                QTimer.singleShot(
+                    0,
+                    lambda: self._sync_filter_widths(self.tbl_run, getattr(self, "_run_filter_cells", []))
+                )
                 QTimer.singleShot(0, lambda: self._sync_filter_scroll(self.tbl_run, self.run_scroll))
                 QTimer.singleShot(0, lambda: self._refit_filter_area(self.run_scroll, self.run_filter_bar))
 

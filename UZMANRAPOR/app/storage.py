@@ -1,22 +1,51 @@
 from __future__ import annotations
 from pathlib import Path
-import os, json, sqlite3, re, secrets, hashlib
 from datetime import datetime
-from zoneinfo import ZoneInfo  # <-- Istanbul TZ
+from zoneinfo import ZoneInfo
+
+import os
+import json
+import re
+import secrets
+import hashlib
+import io
+
 import pandas as pd
+import pyodbc
+
+# ============================================================
+#  GENEL YOLLAR (Kişisel ayarlar – her PC için)
+# ============================================================
 
 APP_DIR = Path.home() / ".uzman_rapor"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 
 RULES_PATH = APP_DIR / "notes_rules.json"
-META_PATH  = APP_DIR / "meta.json"
-DINAMIK_SNAPSHOT = APP_DIR / "dinamik.pkl"
-RUNNING_SNAPSHOT = APP_DIR / "running.pkl"
+META_PATH = APP_DIR / "meta.json"
 USERCFG_PATH = APP_DIR / "user.json"
-USERS_DB_PATH = APP_DIR / "users.json"
+
+# ============================================================
+#  SQL SERVER BAĞLANTISI
+# ============================================================
+
+SQL_CONN_STR = (
+    "Driver={SQL Server};"
+    "Server=10.30.9.14,1433;"
+    "Database=UzmanRaporDB;"
+    "UID=uzmanrapor_login;"
+    "PWD=03114080Ww.;"
+)
 
 
-# ---------- Notes rules (kalıcı) ----------
+def _sql_conn():
+    """UzmanRaporDB bağlantısı."""
+    return pyodbc.connect(SQL_CONN_STR)
+
+
+# ============================================================
+#  NOT KURALLARI (kalıcı, ama yerel JSON'da kalsın)
+# ============================================================
+
 def load_rules() -> list[dict]:
     if RULES_PATH.exists():
         try:
@@ -28,6 +57,7 @@ def load_rules() -> list[dict]:
             pass
     return []
 
+
 def save_rules(rules: list[dict]) -> None:
     try:
         with open(RULES_PATH, "w", encoding="utf-8") as f:
@@ -36,7 +66,10 @@ def save_rules(rules: list[dict]) -> None:
         pass
 
 
-# ---------- Son güncelleme (Planlama tıklanınca) ----------
+# ============================================================
+#  SON GÜNCELLEME (Planlama tıklanınca kaydedilen zaman)
+# ============================================================
+
 def load_last_update() -> datetime | None:
     if META_PATH.exists():
         try:
@@ -53,9 +86,10 @@ def load_last_update() -> datetime | None:
             pass
     return None
 
+
 def save_last_update(dt: datetime) -> None:
     try:
-        # dt naive ise İstanbul TZ’li kabul et
+        # dt naive ise İstanbul TZ'li kabul et
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=ZoneInfo("Europe/Istanbul"))
         meta = {"last_update_iso": dt.isoformat()}
@@ -74,30 +108,94 @@ def save_last_update(dt: datetime) -> None:
         pass
 
 
-# ---------- Snapshot (DF'ler) ----------
-def save_df_snapshot(df: pd.DataFrame | None, which: str) -> None:
+# ============================================================
+#  SNAPSHOT (Dinamik & Running) – SQL TABLOSU
+# ============================================================
+
+def _ensure_snapshot_table() -> None:
+    """
+    Snapshots tablosu:
+      Name: 'dinamik' veya 'running' vb
+      Data: varbinary(max) (pandas pickle)
+    """
+    sql = """
+    IF OBJECT_ID('dbo.Snapshots', 'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.Snapshots (
+            Name      nvarchar(50) NOT NULL PRIMARY KEY,
+            Data      varbinary(max) NULL,
+            UpdatedAt datetime2 NOT NULL CONSTRAINT DF_Snapshots_UpdatedAt DEFAULT (sysdatetime())
+        );
+    END
+    """
     try:
-        if df is None:
-            return
-        if which == "dinamik":
-            df.to_pickle(DINAMIK_SNAPSHOT)
-        elif which == "running":
-            df.to_pickle(RUNNING_SNAPSHOT)
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute(sql)
+            c.commit()
     except Exception:
         pass
 
-def load_df_snapshot(which: str) -> pd.DataFrame | None:
+
+def save_df_snapshot(df: pd.DataFrame | None, which: str) -> None:
+    """
+    Dinamik / Running DataFrame'lerini SQL'e pickle olarak yazar.
+    which: 'dinamik' veya 'running' vb.
+    """
+    if df is None:
+        return
+
+    _ensure_snapshot_table()
+
     try:
-        if which == "dinamik" and DINAMIK_SNAPSHOT.exists():
-            return pd.read_pickle(DINAMIK_SNAPSHOT)
-        if which == "running" and RUNNING_SNAPSHOT.exists():
-            return pd.read_pickle(RUNNING_SNAPSHOT)
+        buf = io.BytesIO()
+        df.to_pickle(buf)
+        data_bytes = buf.getvalue()
+
+        with _sql_conn() as c:
+            cur = c.cursor()
+            # Önce var olan kaydı sil
+            cur.execute("DELETE FROM dbo.Snapshots WHERE Name = ?;", (which,))
+            # Sonra yeni kaydı ekle
+            cur.execute(
+                "INSERT INTO dbo.Snapshots (Name, Data) VALUES (?, ?);",
+                (which, pyodbc.Binary(data_bytes)),
+            )
+            c.commit()
     except Exception:
         pass
+
+
+def load_df_snapshot(which: str) -> pd.DataFrame | None:
+    """
+    Dinamik / Running snapshot'ı SQL'den okur.
+    Kayıt yoksa None döner.
+    """
+    _ensure_snapshot_table()
+
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT Data FROM dbo.Snapshots WHERE Name = ?;", (which,))
+            row = cur.fetchone()
+
+        if not row or row[0] is None:
+            return None
+
+        buf = io.BytesIO(row[0])
+        df = pd.read_pickle(buf)
+        if isinstance(df, pd.DataFrame):
+            return df
+    except Exception:
+        pass
+
     return None
 
 
-# ---------- Kullanıcı varsayılanı ----------
+# ============================================================
+#  KULLANICI VARSAYILANI (Sadece bu PC için – yerel JSON)
+# ============================================================
+
 def get_username_default() -> str:
     if USERCFG_PATH.exists():
         try:
@@ -109,6 +207,7 @@ def get_username_default() -> str:
         except Exception:
             pass
     return "Anonim"
+
 
 def set_username_default(name: str) -> None:
     try:
@@ -123,240 +222,464 @@ def set_username_default(name: str) -> None:
             except Exception:
                 pass
         with open(USERCFG_PATH, "w", encoding="utf-8") as f:
-                    json.dump(d, f, ensure_ascii=False, indent=2)
+            json.dump(d, f, ensure_ascii=False, indent=2)
     except Exception:
-            pass
+        pass
 
-    # ---------- Kullanıcı veritabanı (yetkilendirme) ----------
-    def hash_password(password: str, salt: str) -> str:
-        """Verilen parolayı salt ile SHA-256 kullanarak karmalar."""
-        payload = f"{salt}:{password}".encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
 
-    def ensure_user_db() -> None:
-        """users.json dosyasını yoksa oluşturur (admin/admin varsayılanıyla)."""
-        if USERS_DB_PATH.exists():
-            return
+# ============================================================
+#  LOGIN SİSTEMİ – AppUsers (SQL)
+# ============================================================
 
-        salt = secrets.token_hex(16)
-        default_user = {
-            "username": "admin",
-            "salt": salt,
-            "password_hash": hash_password("admin", salt),
-            "permissions": ["admin", "read", "write"],
+def hash_password(password: str, salt: str) -> str:
+    """Parola + salt için SHA-256 hash."""
+    payload = f"{salt}:{password}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _ensure_app_users_table() -> None:
+    sql = """
+    IF OBJECT_ID('dbo.AppUsers', 'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.AppUsers (
+            Username     nvarchar(50) NOT NULL PRIMARY KEY,
+            Salt         nvarchar(64) NOT NULL,
+            PasswordHash nvarchar(64) NOT NULL,
+            Permissions  nvarchar(max) NULL,      -- JSON (örn: ["admin","read","write"])
+            IsActive     bit NOT NULL CONSTRAINT DF_AppUsers_IsActive DEFAULT (1),
+            CreatedAt    datetime2 NOT NULL CONSTRAINT DF_AppUsers_CreatedAt DEFAULT (sysdatetime())
+        );
+    END
+    """
+    with _sql_conn() as c:
+        cur = c.cursor()
+        cur.execute(sql)
+        c.commit()
+
+
+def ensure_user_db() -> None:
+    """
+    Kullanıcı tablosunun varlığını ve en az 1 admin kullanıcısını garanti eder.
+    Varsayılan: admin / admin
+    """
+    try:
+        _ensure_app_users_table()
+
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT COUNT(*) FROM dbo.AppUsers;")
+            count = cur.fetchone()[0] or 0
+
+            if count == 0:
+                # Varsayılan admin
+                salt = secrets.token_hex(16)
+                pwd_hash = hash_password("admin", salt)
+                perms = json.dumps(["admin", "read", "write"], ensure_ascii=False)
+
+                cur.execute(
+                    """
+                    INSERT INTO dbo.AppUsers (Username, Salt, PasswordHash, Permissions, IsActive)
+                    VALUES (?, ?, ?, ?, 1);
+                    """,
+                    ("admin", salt, pwd_hash, perms),
+                )
+            c.commit()
+    except Exception:
+        # En kötü ihtimalle login ekranı boş kullanıcı listesi ile açılır
+        pass
+
+
+def load_users() -> list[dict]:
+    """
+    Uygulama kullanıcılarını SQL'den okur.
+    Geri dönüş örneği:
+      [
+        {
+          "username": "admin",
+          "salt": "...",
+          "password_hash": "...",
+          "permissions": ["admin","read","write"],
+          "is_active": True,
+          "created_at": "2025-11-14T..."
+        },
+        ...
+      ]
+    """
+    ensure_user_db()
+    users: list[dict] = []
+
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute(
+                "SELECT Username, Salt, PasswordHash, Permissions, IsActive, CreatedAt "
+                "FROM dbo.AppUsers;"
+            )
+            rows = cur.fetchall()
+
+        for row in rows:
+            username = row[0]
+            salt = row[1]
+            pwd_hash = row[2]
+            perms_raw = row[3]
+            is_active = bool(row[4])
+            created_at = row[5]
+
+            # permissions JSON mu string mi?
+            perms: list[str] | str
+            if isinstance(perms_raw, str):
+                try:
+                    tmp = json.loads(perms_raw)
+                    if isinstance(tmp, list):
+                        perms = tmp
+                    else:
+                        perms = perms_raw
+                except Exception:
+                    perms = perms_raw
+            else:
+                perms = []
+
+            users.append(
+                {
+                    "username": username,
+                    "salt": salt,
+                    "password_hash": pwd_hash,
+                    "permissions": perms,
+                    "is_active": is_active,
+                    "created_at": created_at.isoformat()
+                    if isinstance(created_at, datetime)
+                    else str(created_at),
+                }
+            )
+    except Exception:
+        pass
+
+    return users
+
+
+def save_users(users: list[dict]) -> None:
+    """
+    Kullanıcı listesini tamamen SQL'e yazar.
+    Önce tüm satırlar silinir, sonra verilen liste baştan eklenir.
+    """
+    ensure_user_db()
+    if not isinstance(users, list):
+        return
+
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            # Tüm kullanıcıları temizle
+            cur.execute("DELETE FROM dbo.AppUsers;")
+
+            for u in users:
+                username = str(u.get("username", "")).strip()
+                salt = str(u.get("salt", "")).strip()
+                pwd_hash = str(u.get("password_hash", "")).strip()
+                perms = u.get("permissions", [])
+
+                if not username or not salt or not pwd_hash:
+                    continue
+
+                if isinstance(perms, list):
+                    perms_raw = json.dumps(perms, ensure_ascii=False)
+                else:
+                    perms_raw = str(perms)
+
+                is_active = u.get("is_active", True)
+                is_active_bit = 1 if is_active else 0
+
+                cur.execute(
+                    """
+                    INSERT INTO dbo.AppUsers (Username, Salt, PasswordHash, Permissions, IsActive)
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    (username, salt, pwd_hash, perms_raw, is_active_bit),
+                )
+
+            c.commit()
+    except Exception:
+        pass
+
+
+def find_user(username: str) -> dict | None:
+    """Tek bir kullanıcıyı (varsa) döner."""
+    ensure_user_db()
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute(
+                "SELECT Username, Salt, PasswordHash, Permissions, IsActive, CreatedAt "
+                "FROM dbo.AppUsers WHERE Username = ?;",
+                (username,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+
+        perms_raw = row[3]
+        if isinstance(perms_raw, str):
+            try:
+                tmp = json.loads(perms_raw)
+                perms = tmp if isinstance(tmp, list) else perms_raw
+            except Exception:
+                perms = perms_raw
+        else:
+            perms = []
+
+        created_at = row[5]
+        return {
+            "username": row[0],
+            "salt": row[1],
+            "password_hash": row[2],
+            "permissions": perms,
+            "is_active": bool(row[4]),
+            "created_at": created_at.isoformat()
+            if isinstance(created_at, datetime)
+            else str(created_at),
         }
-        data = {"users": [default_user]}
-        try:
-            with open(USERS_DB_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+    except Exception:
+        return None
 
-    def load_users() -> list[dict]:
-        """users.json içindeki kullanıcı kayıtlarını döndürür."""
-        ensure_user_db()
-        try:
-            with open(USERS_DB_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                users = data.get("users", [])
-                if isinstance(users, list):
-                    return users
-        except Exception:
-            pass
+
+def verify_user(username: str, password: str) -> bool:
+    """
+    Kullanıcı adı / parola kontrolü.
+    """
+    u = find_user(username)
+    if not u or not u.get("is_active", True):
+        return False
+    salt = u.get("salt") or ""
+    expected = u.get("password_hash") or ""
+    return hash_password(password, salt) == expected
+
+
+# ============================================================
+#  KESİM TİPİ & SÜS KENAR & KISIT LİSTELERİ – SQL
+# ============================================================
+
+def load_blocked_looms() -> list[str]:
+    """
+    Arızalı / bakımda tezgâhları SQL Server'dan okur.
+    """
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT LoomNo FROM dbo.BlockedLooms ORDER BY LoomNo;")
+            rows = cur.fetchall()
+        return [str(r[0]) for r in rows]
+    except Exception:
         return []
 
-    def save_users(users: list[dict]) -> None:
-        """Kullanıcı listesini users.json içine yazar."""
-        ensure_user_db()
-        payload = {"users": users or []}
-        try:
-            with open(USERS_DB_PATH, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
 
-
-# === Kesim Tipi (ISAVER/ROTOCUT) ve Süs Kenar (Kök Tip) kalıcı sözlükleri ===
-
-def _ensure_app_dir():
-    base = os.path.join(os.path.expanduser("~"), ".uzman_rapor")
-    os.makedirs(base, exist_ok=True)
-    return base
-
-def _kv_path(name: str):
-    return os.path.join(_ensure_app_dir(), f"{name}.json")
-
-# --- Loom -> Kesim Tipi (ISAVER/ROTOCUT) ---
-def load_loom_cut_map() -> dict:
-    p = _kv_path("loom_cut_map")
+def save_blocked_looms(items: list[str]) -> None:
+    """
+    Verilen tezgâh listesini SQL'e yazar (tamamen yeniler).
+    """
+    vals = [
+        re.findall(r"\d+", str(x))[0]
+        for x in (items or [])
+        if re.findall(r"\d+", str(x))
+    ]
+    uniq = sorted(set(vals))
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("DELETE FROM dbo.BlockedLooms;")
+            for loom in uniq:
+                cur.execute(
+                    "INSERT INTO dbo.BlockedLooms (LoomNo) VALUES (?);",
+                    (loom,),
+                )
+            c.commit()
+    except Exception:
+        pass
+
+
+def load_dummy_looms() -> list[str]:
+    """
+    Boş / dummy gösterilecek tezgâhları SQL Server'dan okur.
+    """
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT LoomNo FROM dbo.DummyLooms ORDER BY LoomNo;")
+            rows = cur.fetchall()
+        return [str(r[0]) for r in rows]
+    except Exception:
+        return []
+
+
+def save_dummy_looms(items: list[str]) -> None:
+    """
+    Verilen dummy tezgâh listesini SQL'e yazar (tamamen yeniler).
+    """
+    vals = [
+        re.findall(r"\d+", str(x))[0]
+        for x in (items or [])
+        if re.findall(r"\d+", str(x))
+    ]
+    uniq = sorted(set(vals))
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("DELETE FROM dbo.DummyLooms;")
+            for loom in uniq:
+                cur.execute(
+                    "INSERT INTO dbo.DummyLooms (LoomNo) VALUES (?);",
+                    (loom,),
+                )
+            c.commit()
+    except Exception:
+        pass
+
+
+def load_loom_cut_map() -> dict:
+    """
+    Tezgah -> Kesim Tipi eşlemesini SQL Server'dan okur.
+    Dönüş: {"2201": "ISAVER", "2202": "ROTOCUT", ...}
+    """
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT LoomNo, CutType FROM dbo.LoomCutMap;")
+            rows = cur.fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
     except Exception:
         return {}
+
 
 def save_loom_cut_map(d: dict) -> None:
-    p = _kv_path("loom_cut_map")
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
+    """
+    Verilen dict'i komple SQL'e yazar (öncekileri silip baştan yazar).
+    d: {"2201": "ISAVER", "2202": "ROTOCUT", ...}
+    """
+    if not isinstance(d, dict):
+        return
 
-# --- Kök Tip -> Süs Kenar kütüphanesi ---
-def load_type_selvedge_map() -> dict:
-    p = _kv_path("type_selvedge_map")
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("DELETE FROM dbo.LoomCutMap;")
+
+            for loom, ctype in d.items():
+                loom_str = str(loom).strip()
+                cut_str = str(ctype).strip()
+                if not loom_str or not cut_str:
+                    continue
+                cur.execute(
+                    "INSERT INTO dbo.LoomCutMap (LoomNo, CutType) VALUES (?, ?);",
+                    (loom_str, cut_str),
+                )
+            c.commit()
+    except Exception:
+        pass
+
+
+def load_type_selvedge_map() -> dict:
+    """
+    Kök Tip -> Süs Kenar eşleşmesini SQL'den okur.
+    Dönüş: {"KOK123": "SüsAçıklama", ...}
+    """
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT RootType, Selvedge FROM dbo.TypeSelvedgeMap;")
+            rows = cur.fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
     except Exception:
         return {}
 
+
 def save_type_selvedge_map(d: dict) -> None:
-    p = _kv_path("type_selvedge_map")
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
+    """
+    Verilen dict'i komple SQL'e yazar.
+    d: {"KOK123": "SüsAçıklama", ...}
+    """
+    if not isinstance(d, dict):
+        return
+
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("DELETE FROM dbo.TypeSelvedgeMap;")
+
+            for root, sel in d.items():
+                root_str = str(root).strip()
+                sel_str = str(sel).strip()
+                if not root_str or not sel_str:
+                    continue
+                cur.execute(
+                    "INSERT INTO dbo.TypeSelvedgeMap (RootType, Selvedge) VALUES (?, ?);",
+                    (root_str, sel_str),
+                )
+            c.commit()
+    except Exception:
+        pass
 
 
-# --- USTA DEFTERİ: sayım yardımcıları ---------------------------------------
-def _pick_col(df: pd.DataFrame, names: list[str]) -> str | None:
-    for n in names:
-        if n in df.columns:
-            return n
-    # lowercase fallback
-    low = {c.lower(): c for c in df.columns}
-    for n in names:
-        if n.lower() in low:
-            return low[n.lower()]
-    return None
+# ============================================================
+#  USTA DEFTERİ – SAYIM FONKSİYONU (SQL)
+# ============================================================
 
 def load_usta_dataframe(sqlite_path: str | None = None) -> pd.DataFrame:
     """
-    Usta Defteri kayıtlarını DataFrame olarak döndürür.
-    Tercih sırası: sqlite -> csv -> boş df
-    Kolon adları farklı olabilir; normalize eder:
-      _ts: datetime, _what: {'DÜĞÜM','TAKIM',...}, _dir: {'ALINDI','VERİLDİ',...}
+    Eski API'yi bozmamak için basit bir SQL türevi.
+    _ts: datetime, _what: 'DÜĞÜM' / 'TAKIM', _dir: şimdilik boş string.
     """
-    # 1) Kaynak: sqlite (varsayılan proje kökünde 'usta_defteri.sqlite')
-    if sqlite_path is None:
-        sqlite_path = os.path.join(os.getcwd(), "usta_defteri.sqlite")
-    df = pd.DataFrame()
-    if os.path.exists(sqlite_path):
-        try:
-            with sqlite3.connect(sqlite_path) as conn:
-                # olası tablo adları: 'usta_defteri', 'entries', 'logs'
-                for tname in ["usta_defteri", "entries", "logs"]:
-                    try:
-                        tmp = pd.read_sql(f"SELECT * FROM {tname}", conn)
-                        if not tmp.empty:
-                            df = tmp
-                            break
-                    except Exception:
-                        continue
-        except Exception:
-            pass
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT Id, Tarih, IsTanimi FROM dbo.UstaDefteri;")
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            df = pd.DataFrame.from_records(rows, columns=cols)
+    except Exception:
+        return pd.DataFrame(columns=["_ts", "_what", "_dir"])
 
-    # 2) CSV fallback
-    if df.empty:
-        for csv_name in ["usta_defteri.csv", "usta_defteri_logs.csv"]:
-            p = os.path.join(os.getcwd(), csv_name)
-            if os.path.exists(p):
-                try:
-                    df = pd.read_csv(p)
-                    break
-                except Exception:
-                    pass
+    # Tarih -> datetime
+    try:
+        ts = pd.to_datetime(df["Tarih"], errors="coerce")
+    except Exception:
+        ts = pd.NaT
 
-    if df.empty:
-        return pd.DataFrame(columns=["_ts","_what","_dir"])
-
-    # --- normalize ---
-    # zaman
-    c_ts = _pick_col(df, ["created_at","timestamp","Tarih Saat","Tarih","Datetime","Date"])
-    if c_ts:
-        ts = pd.to_datetime(df[c_ts], dayfirst=True, errors="coerce")
-    else:
-        ts = pd.Series(pd.NaT, index=df.index)
     df["_ts"] = ts
+    df["_what"] = df.get("IsTanimi", "").astype(str).str.upper()
+    df["_dir"] = ""  # Şimdilik yön bilgisi yok
 
-    # tür / konu (düğüm/takım)
-    c_what = _pick_col(df, ["Tür","Tip","Kategori","Kayıt Tipi","Kayit Turu","Subject","Topic"])
-    # işlem / yön (alındı/verildi)
-    c_dir  = _pick_col(df, ["İşlem","Aksiyon","Durum","Action","Operation","Aciklama","Açıklama","Not"])
+    return df[["_ts", "_what", "_dir"]]
 
-    def _norm_what(row):
-        texts = []
-        for c in [c_what, c_dir]:
-            if c and c in df.columns:
-                texts.append(str(row.get(c, "")).upper())
-        blob = " ".join(texts)
-        if "DÜĞÜM" in blob:
-            return "DÜĞÜM"
-        if "TAKIM" in blob:
-            return "TAKIM"
-        return ""
 
-    def _norm_dir(row):
-        texts = []
-        for c in [c_dir, c_what]:
-            if c and c in df.columns:
-                texts.append(str(row.get(c, "")).upper())
-        blob = " ".join(texts)
-        if "ALINDI" in blob or "ALMA" in blob or "ALDI" in blob or "AL " in blob:
-            return "ALINDI"
-        if "VERİLDİ" in blob or "VERME" in blob or "VERD" in blob or "VER " in blob:
-            return "VERİLDİ"
-        return ""
-
-    df["_what"] = df.apply(_norm_what, axis=1)
-    df["_dir"]  = df.apply(_norm_dir, axis=1)
-
-    df = df[~df["_ts"].isna()]  # tarihi olmayanı ele
-    return df
-
-def count_usta_between(start_dt: datetime, end_dt: datetime, what: str = "DÜĞÜM", direction: str = "ALINDI") -> int:
+def count_usta_between(
+    start_dt: datetime, end_dt: datetime, what: str = "DÜĞÜM", direction: str = "ALINDI"
+) -> int:
     """
     [start_dt, end_dt) aralığında Usta Defteri'nden sayım.
-    what: 'DÜĞÜM' veya 'TAKIM' (büyük/küçük duyarsız)
-    direction: 'ALINDI' veya 'VERİLDİ'
+    Şu an yön (ALINDI/VERİLDİ) bilgisi tabloya kaydedilmediği için sadece IsTanimi bazında sayım yapılır.
     """
-    df = load_usta_dataframe()
-    if df.empty:
-        return 0
-    w = str(what).upper().strip()
-    d = str(direction).upper().strip()
-    m = (df["_ts"] >= start_dt) & (df["_ts"] < end_dt)
-    if w:
-        m &= (df["_what"] == w)
-    if d:
-        m &= (df["_dir"] == d)
-    return int(m.sum())
-
-
-# ---------------------------------------------------------------------------
-# Kısıt listeleri (Arızalı/Bakımda ve Boş Gösterilecek) – kalıcı JSON
-def load_blocked_looms() -> list[str]:
-    p = _kv_path("blocked_looms")
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        s_date = start_dt.date()
+        e_date = end_dt.date()
+        w = str(what).upper().strip()
+
+        sql = """
+        SELECT COUNT(*)
+        FROM dbo.UstaDefteri
+        WHERE Tarih >= ? AND Tarih < ?
+        """
+        params: list[object] = [s_date, e_date]
+
+        if w:
+            sql += " AND UPPER(IsTanimi) = ?"
+            params.append(w)
+
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute(sql, tuple(params))
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
     except Exception:
-        return []
+        pass
 
-def save_blocked_looms(items: list[str]) -> None:
-    p = _kv_path("blocked_looms")
-    vals = [re.findall(r"\d+", str(x))[0] for x in (items or []) if re.findall(r"\d+", str(x))]
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(sorted(set(vals)), f, ensure_ascii=False, indent=2)
-
-def load_dummy_looms() -> list[str]:
-    p = _kv_path("dummy_looms")
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def save_dummy_looms(items: list[str]) -> None:
-    p = _kv_path("dummy_looms")
-    vals = [re.findall(r"\d+", str(x))[0] for x in (items or []) if re.findall(r"\d+", str(x))]
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(sorted(set(vals)), f, ensure_ascii=False, indent=2)
+    return 0

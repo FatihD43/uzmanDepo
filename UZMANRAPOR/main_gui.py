@@ -9,7 +9,7 @@ def main():
     login = LoginDialog()
     if login.exec() != QDialog.Accepted or login.user is None:
         return
-    win = MainWindow(user=login.user);
+    win = MainWindow(user=login.user)
     win.show()
     sys.exit(app.exec())
 if __name__ == "__main__":
