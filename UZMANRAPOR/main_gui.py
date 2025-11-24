@@ -12,5 +12,6 @@ def main():
     win = MainWindow(user=login.user)
     win.show()
     sys.exit(app.exec())
+
 if __name__ == "__main__":
     main()

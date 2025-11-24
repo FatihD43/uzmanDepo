@@ -1,11 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable, Optional
-import json
 
 from app import storage
-
 
 @dataclass(frozen=True)
 class User:
@@ -47,11 +44,15 @@ def authenticate(username: str, password: str) -> Optional[User]:
 
     password = password or ""
 
+    ensure_fn = getattr(storage, "ensure_user_db", None)
+    if callable(ensure_fn):
+        try:
+            ensure_fn()
+        except Exception:
+            pass
+
     load_users_fn = getattr(storage, "load_users", None)
-    if callable(load_users_fn):
-        records = load_users_fn()
-    else:
-        records = _load_users_fallback()
+    records = load_users_fn() if callable(load_users_fn) else []
     for rec in records:
         rec_username = str(rec.get("username", "")).strip()
         if rec_username.lower() != username.lower():
@@ -82,19 +83,24 @@ def authenticate(username: str, password: str) -> Optional[User]:
 
 
 def list_users() -> list[User]:
-    """users.json içindeki tüm kullanıcıları döndürür."""
+    """SQL'deki tüm kullanıcıları döndürür."""
     out: list[User] = []
+    ensure_fn = getattr(storage, "ensure_user_db", None)
+    if callable(ensure_fn):
+        try:
+            ensure_fn()
+        except Exception:
+            pass
+
     load_users_fn = getattr(storage, "load_users", None)
-    if callable(load_users_fn):
-        records = load_users_fn()
-    else:
-        records = _load_users_fallback()
+    records = load_users_fn() if callable(load_users_fn) else []
 
     for rec in records:
         user = _build_user(rec)
         if user:
             out.append(user)
     return out
+
 
 def _check_password(candidate: str, salt: str, expected_hash: str) -> bool:
     """Compare the given password against the stored hash, tolerating missing helpers."""
@@ -107,32 +113,3 @@ def _check_password(candidate: str, salt: str, expected_hash: str) -> bool:
             return False
     # Fallback: treat stored value as plain text if hashing helper is unavailable.
     return candidate == expected_hash
-
-
-def _load_users_fallback() -> list[dict]:
-    """Minimal users.json reader used when storage.load_users() is absent."""
-
-    ensure_fn = getattr(storage, "ensure_user_db", None)
-    if callable(ensure_fn):
-        try:
-            ensure_fn()
-        except Exception:
-            pass
-
-    user_db_path = getattr(storage, "USERS_DB_PATH", None)
-    if user_db_path is None:
-        user_db_path = Path.home() / ".uzman_rapor" / "users.json"
-    else:
-        user_db_path = Path(user_db_path)
-
-    try:
-        with open(user_db_path, "r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except Exception:
-        return []
-
-    if isinstance(payload, dict):
-        users = payload.get("users")
-        if isinstance(users, list):
-            return users
-    return []

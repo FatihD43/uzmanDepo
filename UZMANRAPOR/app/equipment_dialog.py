@@ -19,11 +19,10 @@ def _norm_choice(val: str) -> str:
         return "ISAVERKit"
     return ""
 
-
 class LoomCutEditor(QDialog):
     """
     2201–2518 tezgahları için Kesim Tipi (ISAVER / ROTOCUT / ISAVERKit) düzenleme.
-    Veriler ~/.uzman_rapor/loom_cut_map.json içinde saklanır.
+    Veriler SQL tablosu LoomCutMap içinde saklanır.
     """
     def __init__(self, parent=None, start_loom=2201, end_loom=2518):
         super().__init__(parent)

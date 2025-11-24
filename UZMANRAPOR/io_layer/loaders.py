@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import re
 from pathlib import Path
+from PySide6.QtWidgets import QMessageBox
+
 
 VISIBLE_COLUMNS = [
     "Tezgah Numarası", "Kök Tip Kodu",
@@ -187,7 +189,47 @@ def load_dinamik_any(path: str|Path) -> pd.DataFrame:
     a2 = _num(_safe_get(df, "Atkı-2 İşletme Depoları"))
     a2d = _num(_safe_get(df, "Atkı-2 İşletme Diğer Depoları"))
     df["(Atkı-2 İşletme Depoları + Atkı-2 İşletme Diğer Depoları)"] = a2.add(a2d, fill_value=0)
-    # --- /ADD ---
+    # --- İPLİK NUMARASI + İPLİK KODU BİRLEŞTİRME ---
+    # Örn: 150 + RS0000269 → "150 RS0000269"
+    df = _combine_yarn_with_number(df, "Atkı İpliği 1", "Atkı İplik No 1")
+    df = _combine_yarn_with_number(df, "Atkı İpliği 2", "Atkı İplik No 2")
+    df = _combine_yarn_with_number(df, "Çözgü İpliği 1", "Çözgü İplik No 1")
+    df = _combine_yarn_with_number(df, "Çözgü İpliği 2", "Çözgü İplik No 2")
+
+    # --- Etiket / Haşıl İş Emri sütunlarında .0 temizliği ---
+    for col in ["Levent Etiket FA", "Haşıl İş Emri"]:
+        if col in df.columns:
+            s = df[col].astype(str).str.strip()
+            # 123456.0  → 123456
+            # 987.00    → 987
+            s = s.str.replace(r"\.0+$", "", regex=True)
+            # 'nan', 'NaT' stringlerini boş yap
+            s = s.replace({"nan": "", "NaT": ""})
+            df[col] = s
+
+    return df
+def _combine_yarn_with_number(df: pd.DataFrame, yarn_col: str, num_col: str) -> pd.DataFrame:
+    """
+    Excel'de:
+      - num_col: 'Atkı İplik No 1', 'Atkı İplik No 2', 'Çözgü İplik No 1', 'Çözgü İplik No 2'
+      - yarn_col: 'Atkı İpliği 1', 'Atkı İpliği 2', 'Çözgü İpliği 1', 'Çözgü İpliği 2'
+
+    Hücreyi şu forma çevirir:
+        '<num> <yarn>'
+    örn: '150 RS0000269', '9/1 EKC000593'
+    """
+    if yarn_col not in df.columns or num_col not in df.columns:
+        return df
+
+    ser_num = df[num_col].astype(str).fillna("").str.strip()
+    ser_yarn = df[yarn_col].astype(str).fillna("").str.strip()
+
+    # Hem numara hem iplik kodu doluysa "num + boşluk + kod"
+    combined = ser_yarn.copy()
+    mask = (ser_num != "") & (ser_yarn != "")
+    combined[mask] = ser_num[mask] + " " + ser_yarn[mask]
+
+    df[yarn_col] = combined
     return df
 
 def load_running_orders(path: str|Path) -> pd.DataFrame:
@@ -271,41 +313,124 @@ def enrich_running_with_loom_cut(df_run: pd.DataFrame) -> pd.DataFrame:
 
 def enrich_running_with_selvedge(df_run: pd.DataFrame, df_dinamik: pd.DataFrame) -> pd.DataFrame:
     """
-    Kök Tip → Süs Kenar kütüphanesini günceller ve df_run'a 'Süs Kenar' sütunu oluşturur.
-    - Dinamik'te KökTip ve SüsKenar varsa kütüphaneye ekler/override etmez (yeni öğrenir).
-    - Running'de KökTip kolonu bulunursa (çeşitli ad varyantları), kütüphaneden doldurur.
+    Kök Tip → Süs Kenar kütüphanesini günceller ve df_run'a 'Süs Kenar' sütununu oluşturur.
+
+    Davranış:
+    - SQL'deki TypeSelvedgeMap ilk olarak okunur (lib).
+    - Dinamik'te KökTip + SüsKenar varsa:
+        * Eğer lib'te yoksa: yeni kayıt EKLENİR.
+        * Eğer lib'te varsa ve DEĞİŞİKSE: kullanıcıya "revize kabul edilsin mi?" diye sorulur.
+          - EVET: lib'teki değer yeni değere güncellenir.
+          - HAYIR: lib'teki eski değer korunur.
+    - Running'de KökTip kolonu bulunursa, kütüphaneden 'Süs Kenar' doldurulur.
     """
     if df_run is None or df_run.empty:
         return df_run
 
-    # 1) Kütüphaneyi güncelle: Dinamik'ten öğren
-    lib = load_type_selvedge_map()  # {"KOKTIP":"SÜSLÜ", ...}
+    # 1) Kütüphaneyi SQL'den oku
+    lib = load_type_selvedge_map()  # {"KOKTIP":"SÜS", ...}
+
+    # 1.a) Dinamik'ten yeni / revize bilgileri topla
     if df_dinamik is not None and not df_dinamik.empty:
         col_kok = None
-        for n in ["Kök Tip Kodu","KökTip","KokTip"]:
-            if n in df_dinamik.columns: col_kok = n; break
+        for n in ["Kök Tip Kodu", "KökTip", "KokTip"]:
+            if n in df_dinamik.columns:
+                col_kok = n
+                break
+
         col_sus = None
-        for n in ["Süs Kenar","SüsKenar","Süs Kenarı","Süs Kenarı Adı","Selvedge","Selvedge Tipi"]:
-            if n in df_dinamik.columns: col_sus = n; break
+        for n in ["Süs Kenar", "SüsKenar", "Süs Kenarı", "Süs Kenarı Adı", "Selvedge", "Selvedge Tipi"]:
+            if n in df_dinamik.columns:
+                col_sus = n
+                break
+
         if col_kok and col_sus:
-            # yeni gördüklerimizi ekle (mevcutı ezmeden)
+            # Aynı tipi birden fazla satırda görürsek, Dinamik içindeki son değeri baz alalım
+            dinamik_map: dict[str, str] = {}
             for kok, sus in df_dinamik[[col_kok, col_sus]].dropna().itertuples(index=False):
                 k = str(kok).strip().upper()
                 v = str(sus).strip()
-                if k and v and (k not in lib):
-                    lib[k] = v
-            save_type_selvedge_map(lib)
+                if not k or not v:
+                    continue
+                dinamik_map[k] = v
 
-    # 2) Running'i doldur: KökTip üzerinden
+            changed = False  # SQL'e gerçekten yazmamız gerekecek mi?
+
+            for k, v in dinamik_map.items():
+                eski = lib.get(k)
+
+                # Kütüphanede yoksa: direkt ekle (öğren)
+                if eski is None:
+                    lib[k] = v
+                    changed = True
+                    continue
+
+                # Kütüphanede var ve değer aynıysa: bir şey yapma
+                if str(eski).strip() == v:
+                    continue
+
+                # Buraya geldiysek: REVİZYON TESPİT EDİLDİ
+                # Kullanıcıya soralım
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Question)
+                msg.setWindowTitle("Süs Kenar Revizyonu")
+                msg.setText(
+                    f"Kök tip için süs kenar revizyonu tespit edildi.\n\n"
+                    f"Kök Tip: {k}\n"
+                    f"Tezgahtaki (kütüphane) süs kenar: {eski}\n"
+                    f"Dinamik rapordaki yeni süs kenar: {v}\n\n"
+                    "Bu tip için revizeyi kabul etmek istiyor musunuz?"
+                )
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg.setDefaultButton(QMessageBox.No)
+
+                cevap = msg.exec()
+
+                if cevap == QMessageBox.Yes:
+                    # Revizeyi kabul et → kütüphaneyi güncelle
+                    lib[k] = v
+                    changed = True
+                else:
+                    # HAYIR dendi → eski değer olduğu gibi kalsın
+                    pass
+
+            if changed:
+                save_type_selvedge_map(lib)
+
+    # 2) Running'i doldur: KökTip üzerinden 'Süs Kenar' üret
     col_kok_run = None
-    for n in ["Kök Tip Kodu","KökTip","KokTip"]:
-        if n in df_run.columns: col_kok_run = n; break
+    for n in ["Kök Tip Kodu", "KökTip", "KokTip"]:
+        if n in df_run.columns:
+            col_kok_run = n
+            break
 
     df_out = df_run.copy()
+
     if col_kok_run and lib:
-        df_out["Süs Kenar"] = df_out[col_kok_run].astype(str).str.strip().str.upper().map(lambda x: lib.get(x, None))
+        # --- YENİ: Running'de gerçekten kullanılan tipleri bul ---
+        used_keys = (
+            df_out[col_kok_run]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        used_set = set(used_keys)
+
+        # Sadece bu tipler için küçük bir kütüphane oluştur
+        lib_small = {k: v for k, v in lib.items() if k in used_set}
+
+        # Şimdi mapping'i bu küçük sözlükle yap
+        df_out["Süs Kenar"] = (
+            df_out[col_kok_run]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .map(lambda x: lib_small.get(x, None))
+        )
     else:
-        # Şimdilik boş; ileride library doldukça otomatik tamamlanır
         df_out["Süs Kenar"] = pd.NA
 
     return df_out

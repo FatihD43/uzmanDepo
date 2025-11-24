@@ -3,11 +3,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import List, Dict
 
-import json
+import ast
+import base64
 import re
 import secrets
 import hashlib
 import io
+import pickle
 
 import pandas as pd
 import pyodbc
@@ -32,12 +34,9 @@ def _sql_conn():
     return pyodbc.connect(SQL_CONN_STR)
 
 
-# ============================================================
 #  APP META TABLOSU (GENEL ANAHTAR/DEĞER)
 #    - last_update       : planlama güncellik zamanı (ISO datetime)
-#    - notes_rules       : not kuralları listesi (JSON)
 #    - last_username     : en son giriş yapan kullanıcı adı
-# ============================================================
 
 def _ensure_meta_table() -> None:
     """
@@ -96,39 +95,117 @@ def _meta_set(key: str, value: str | None) -> None:
         c.commit()
 
 
-# ============================================================
-#  NOT KURALLARI (Artık SQL: AppMeta.notes_rules)
-# ============================================================
+#  NOT KURALLARI (Tamamen SQL: dbo.NoteRules veya AppMeta üzerinden saklama)
 
-def load_rules() -> list[dict]:
+
+def _note_rules_table_exists() -> bool:
+    """NoteRules tablosu erişilebilir mi?"""
+    sql = """
+    SELECT 1
+    FROM sys.objects
+    WHERE object_id = OBJECT_ID('dbo.NoteRules')
+      AND type = 'U';
     """
-    Not kurallarını SQL'den okur.
-    AppMeta.MetaKey = 'notes_rules' içinde JSON list olarak tutulur.
-    """
-    raw = _meta_get("notes_rules")
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute(sql)
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+def _decode_rules_from_meta(raw: str | bytes | None) -> list[dict]:
     if not raw:
         return []
     try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return data
+        blob = base64.b64decode(raw)
+        obj = pickle.loads(blob)
+        if isinstance(obj, list):
+            return [r for r in obj if isinstance(r, dict)]
     except Exception:
         pass
     return []
 
 
+def load_rules() -> list[dict]:
+    """
+    Not kurallarını SQL'den okur.
+
+    Öncelik: AppMeta.note_rules (base64 + pickle ile saklanmış liste)
+    Geriye dönük: NoteRules tablosu varsa buradan okumayı dener.
+    """
+    meta_rules = _decode_rules_from_meta(_meta_get("note_rules"))
+    if meta_rules:
+        return meta_rules
+
+    if not _note_rules_table_exists():
+        return []
+
+    rules: list[dict] = []
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("SELECT RuleData FROM dbo.NoteRules ORDER BY Id;")
+            rows = cur.fetchall()
+
+        for row in rows:
+            blob = row[0]
+            if blob is None:
+                continue
+            try:
+                rule = pickle.loads(blob)
+                if isinstance(rule, dict):
+                    rules.append(rule)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return rules
+
+
 def save_rules(rules: list[dict]) -> None:
     """
-    Not kurallarını SQL'e yazar.
+    Not kurallarını AppMeta.note_rules anahtarına yazar.
+    Ayrıca NoteRules tablosu varsa (ve erişilebiliyorsa) orayı da günceller.
     """
-    try:
-        payload = json.dumps(rules or [], ensure_ascii=False)
-    except Exception:
-        # JSON'e çevrilemiyorsa kaydetmeyelim
+    if not isinstance(rules, list):
         return
-    _meta_set("notes_rules", payload)
 
+    cleaned = [r for r in rules if isinstance(r, dict)]
 
+    # --- AppMeta'ya base64 pickle olarak yaz ---
+    try:
+        if cleaned:
+            blob = pickle.dumps(cleaned)
+            payload = base64.b64encode(blob).decode("ascii")
+            _meta_set("note_rules", payload)
+        else:
+            _meta_set("note_rules", None)
+    except Exception:
+        pass
+
+    # --- Eğer NoteRules tablosu erişilebilir ise aynı veriyi oraya da yaz ---
+
+    if not _note_rules_table_exists():
+        return
+
+    try:
+        with _sql_conn() as c:
+            cur = c.cursor()
+            cur.execute("DELETE FROM dbo.NoteRules;")
+
+            for rule in cleaned:
+                try:
+                    blob = pickle.dumps(rule)
+                except Exception:
+                    continue
+                cur.execute(
+                    "INSERT INTO dbo.NoteRules (RuleData) VALUES (?);",
+                    (pyodbc.Binary(blob),),
+                )
+            c.commit()
+    except Exception:
+        pass
 # ============================================================
 #  SON GÜNCELLEME (Planlama tıklanınca kaydedilen zaman)
 #    - AppMeta.MetaKey = 'last_update'
@@ -311,7 +388,7 @@ def _ensure_app_users_table() -> None:
             Username     nvarchar(50) NOT NULL PRIMARY KEY,
             Salt         nvarchar(64) NOT NULL,
             PasswordHash nvarchar(64) NOT NULL,
-            Permissions  nvarchar(max) NULL,      -- JSON (örn: ["admin","read","write"])
+            Permissions  nvarchar(max) NULL,      -- Virgül ile ayrılmış izinler (örn: admin,read,write)
             IsActive     bit NOT NULL CONSTRAINT DF_AppUsers_IsActive DEFAULT (1),
             CreatedAt    datetime2(0) NOT NULL CONSTRAINT DF_AppUsers_CreatedAt DEFAULT (SYSUTCDATETIME())
         );
@@ -337,10 +414,10 @@ def ensure_user_db() -> None:
             count = cur.fetchone()[0] or 0
 
             if count == 0:
-                # Varsayılan admin
+                # Varsayılan admin␊
                 salt = secrets.token_hex(16)
                 pwd_hash = hash_password("admin", salt)
-                perms = json.dumps(["admin", "read", "write"], ensure_ascii=False)
+                perms = "admin,read,write"
 
                 cur.execute(
                     """
@@ -391,16 +468,17 @@ def load_users() -> list[dict]:
             is_active = bool(row[4])
             created_at = row[5]
 
-            # permissions JSON mu string mi?
             if isinstance(perms_raw, str):
+                parsed: list[str] | str
                 try:
-                    tmp = json.loads(perms_raw)
-                    if isinstance(tmp, list):
-                        perms: list[str] | str = tmp
-                    else:
-                        perms = perms_raw
+                    tmp = ast.literal_eval(perms_raw)
+                    parsed = tmp if isinstance(tmp, list) else perms_raw
                 except Exception:
-                    perms = perms_raw
+                    parsed = perms_raw
+                if isinstance(parsed, list):
+                    perms = [str(p).strip() for p in parsed if str(p).strip()]
+                else:
+                    perms = [p.strip() for p in parsed.split(",") if p.strip()]
             else:
                 perms = []
 
@@ -447,7 +525,7 @@ def save_users(users: list[dict]) -> None:
                     continue
 
                 if isinstance(perms, list):
-                    perms_raw = json.dumps(perms, ensure_ascii=False)
+                    perms_raw = ",".join([str(p).strip() for p in perms if str(p).strip()])
                 else:
                     perms_raw = str(perms)
 
@@ -483,12 +561,17 @@ def find_user(username: str) -> dict | None:
             return None
 
         perms_raw = row[3]
+        perms_raw = row[3]
         if isinstance(perms_raw, str):
             try:
-                tmp = json.loads(perms_raw)
-                perms = tmp if isinstance(tmp, list) else perms_raw
+                tmp = ast.literal_eval(perms_raw)
+                parsed = tmp if isinstance(tmp, list) else perms_raw
             except Exception:
-                perms = perms_raw
+                parsed = perms_raw
+            if isinstance(parsed, list):
+                perms = [str(p).strip() for p in parsed if str(p).strip()]
+            else:
+                perms = [p.strip() for p in parsed.split(",") if p.strip()]
         else:
             perms = []
 

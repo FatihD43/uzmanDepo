@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import json
-import secrets
-from pathlib import Path
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -20,53 +16,11 @@ from app import storage
 from app import auth
 
 def _bootstrap_user_db() -> None:
-    """Ensure the users.json file exists even on deployments without storage.ensure_user_db."""
+    """SQL kullanıcı tablosunun varlığını garanti eder."""
 
     ensure_fn = getattr(storage, "ensure_user_db", None)
     if callable(ensure_fn):
         ensure_fn()
-        return
-
-    # Backwards-compatible fallback: create the default admin user if the helper is missing.
-    user_db_path = getattr(storage, "USERS_DB_PATH", None)
-    if user_db_path is None:
-        app_dir = Path.home() / ".uzman_rapor"
-        user_db_path = app_dir / "users.json"
-    else:
-        user_db_path = Path(user_db_path)
-
-    if user_db_path.exists():
-        return
-
-    user_db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    hash_fn = getattr(storage, "hash_password", None)
-    if callable(hash_fn):
-        salt = secrets.token_hex(16)
-        password_hash = hash_fn("admin", salt)
-    else:
-        # Minimal fallback – store the password as plain text if hashing helper is absent.
-        salt = ""
-        password_hash = "admin"
-
-    payload = {
-        "users": [
-            {
-                "username": "admin",
-                "salt": salt,
-                "password_hash": password_hash,
-                "permissions": ["admin", "read", "write"],
-            }
-        ]
-    }
-
-    try:
-        with open(user_db_path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-    except Exception:
-        # Silently ignore; login flow will surface an authentication error later if this fails.
-        pass
-
 class LoginDialog(QDialog):
     """Kullanıcı adı / şifre girişi için basit dialog."""
 
@@ -90,8 +44,8 @@ class LoginDialog(QDialog):
         layout.addLayout(form)
 
         self.lbl_hint = QLabel(
-            "Varsayılan kullanıcı: <b>admin</b> / <b>admin</b><br>"
-            "Kullanıcı listesi: ~/.uzman_rapor/users.json"
+        "Varsayılan kullanıcı: <b>admin</b> / <b>admin</b><br>"
+        "Kullanıcılar SQL veritabanında saklanır."
         )
         self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)

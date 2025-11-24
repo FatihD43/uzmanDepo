@@ -270,7 +270,7 @@ class LoomListEditor(QDialog):
         val = ", ".join(tokens)
         # 1) QSettings
         self.settings.setValue(self.key, val)
-        # 2) storage JSON (merkezi kullanım için)
+        # 2) storage SQL (merkezi kullanım için)
         try:
             if self.key == "looms/blocked":
                 storage.save_blocked_looms(tokens)
@@ -611,12 +611,14 @@ class MainWindow(QMainWindow):
             self.team_flow.set_write_enabled(self.has_permission("write"))
 
     def _refresh_dugum_view(
-        self,
-        group_filter: str | None = None,
-        category_filter: str | None = None,
-        only_with_levent_digits: bool = False,
-        rebuild_filters: bool = True
+            self,
+            group_filter: str | None = None,
+            category_filter: str | None = None,
+            only_with_levent_digits: bool = False,
+            rebuild_filters: bool = True,
+            autosize: bool = True,
     ):
+
         df = self.df_dinamik_full
         if df is None:
             return
@@ -636,19 +638,33 @@ class MainWindow(QMainWindow):
 
         cols = [c for c in VISIBLE_COLUMNS if c in view.columns]
         ordered = [c for c in VISIBLE_COLUMNS if c in cols]
+
         view_for_ui = self._with_aliases(view[ordered].copy())
+
+        # --- YENİ: Mamül Termin ve Levent Haşıl Tarihi sütunlarında saatleri kaldır ---
+        for col in ["Mamul Termin", "Levent Haşıl Tarihi"]:
+            if col in view_for_ui.columns:
+                # Önce datetime'e çevir (NaT olanlar korunur)
+                ser = pd.to_datetime(view_for_ui[col], errors="coerce")
+                # Sonra sadece tarih formatı (dd.mm.yyyy) olarak string yap
+                view_for_ui[col] = ser.dt.strftime("%d.%m.%Y")
+                # NaT → boş string
+                view_for_ui[col] = view_for_ui[col].fillna("")
+
         self.model.set_df(view_for_ui)
 
         # 1) autosize
-        QTimer.singleShot(
-            0,
-            lambda: self._autosize_columns(
-                self.tbl,
-                getattr(self, "_dugum_filter_cells", []),
-                self.dugum_filter_bar,
-                self.dugum_scroll
+        if autosize:
+            QTimer.singleShot(
+                0,
+                lambda: self._autosize_columns(
+                    self.tbl,
+                    getattr(self, "_dugum_filter_cells", []),
+                    self.dugum_filter_bar,
+                    self.dugum_scroll
+                )
             )
-        )
+
         # 2) filtre barını yeniden kur
         if rebuild_filters:
             QTimer.singleShot(0, self._rebuild_dugum_filters)
@@ -715,6 +731,15 @@ class MainWindow(QMainWindow):
     # -------------------------
     # NOTES: diyalog ve uygulama
     # -------------------------
+    # -------------------------
+    # NOTES: diyalog ve uygulama
+    # -------------------------
+    # -------------------------
+    # NOTES: diyalog ve uygulama
+    # -------------------------
+    # -------------------------
+    # NOTES: diyalog ve uygulama
+    # -------------------------
     def open_notes(self):
         if not require_permission(self, "write", "Not kurallarında değişiklik yapma yetkiniz yok."):
             return
@@ -722,15 +747,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Bilgi", "Önce Dinamik raporu yükleyin.")
             return
 
+        # Mevcut kuralları dialoga ver
         dlg = NotesDialog(self.df_dinamik_full, self._note_rules, parent=self)
         if dlg.exec():
-            rule = dlg.result_rule()
-            if rule:
-                self._note_rules.append(rule)
-                storage.save_rules(self._note_rules)          # kalıcı kaydet
+            rules = dlg.result_rules()
+            if rules is not None:
+                # Kullanıcının düzenlediği tam listeyi al
+                self._note_rules = rules
+
+                # Kalıcı kaydet (AppMeta.notes_rules)
+                storage.save_rules(self._note_rules)
+
+                # Dinamik df üzerine notları yeniden uygula
                 self._apply_notes_and_autonotes()
+
+                # Görünümü tazele (filtreleri bozmadan)
                 self._refresh_dugum_view(rebuild_filters=False)
+
+                # Snapshot kaydet
                 storage.save_df_snapshot(self.df_dinamik_full, "dinamik")
+
+                # Kuşbakışı yenile
                 self._refresh_kusbakisi()
 
     def _append_note(self, old: str, add: str) -> str:
@@ -810,13 +847,36 @@ class MainWindow(QMainWindow):
         return df
 
     def _apply_notes_and_autonotes(self):
+        """
+        NOTLAR sütununu her seferinde TEMİZDEN hesapla:
+
+        - İlk çalıştığında mevcut NOTLAR değerini _NOTLAR_BASE kolonuna kopyalar.
+        - Sonraki her çağrıda NOTLAR'ı _NOTLAR_BASE'den geri yükler.
+        - Üzerine otomatik ATKI notlarını ve manuel kural notlarını uygular.
+        """
         if self.df_dinamik_full is None or self.df_dinamik_full.empty:
             return
+
         df = self.df_dinamik_full
+
+        # NOTLAR yoksa oluştur
         if "NOTLAR" not in df.columns:
             df["NOTLAR"] = ""
 
+        # Orijinal NOTLAR'ı bir kere yedekle
+        if "_NOTLAR_BASE" not in df.columns:
+            df["_NOTLAR_BASE"] = df["NOTLAR"].astype(str)
+        else:
+            # Emin olmak için string’e çevir
+            df["_NOTLAR_BASE"] = df["_NOTLAR_BASE"].astype(str)
+
+        # Her seferinde temiz bir başlangıç:
+        df["NOTLAR"] = df["_NOTLAR_BASE"]
+
+        # 1) Otomatik ATKI eksikliği notları
         df = self._apply_auto_atki_notes(df)
+
+        # 2) Senin tanımladığın manuel kurallar
         df = self._apply_manual_rules(df)
 
         self.df_dinamik_full = df
@@ -1158,52 +1218,38 @@ class MainWindow(QMainWindow):
 
     def _autosize_columns(
         self,
-        table: QTableView,
-        cells: list | None = None,
-        bar: QWidget | None = None,
-        scroll: QScrollArea | None = None,
-        base_min: int = 56,
-        max_px: int = 260,
-        char_px: int = 8,
-        padding: int = 14,
+        table,
+        filter_cells=None,
+        filter_bar=None,
+        scroll=None,
     ):
-        if not table.model() or table.model().columnCount() == 0:
+        """
+        - Tüm sütunları Qt'nin ResizeToContents mantığıyla ayarlar.
+        - Hiçbir sütun için ekstra sınırlama yok (NOTLAR da dahil).
+        """
+        model = table.model()
+        header = table.horizontalHeader()
+        if model is None or header is None:
             return
 
-        model = table.model()
-        h = table.horizontalHeader()
+        # 1) Qt'ye tüm sütunları içeriklerine göre auto-size yaptır
+        try:
+            table.resizeColumnsToContents()
+        except Exception:
+            pass
 
-        h.setStretchLastSection(False)
-        h.setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.resizeColumnsToContents()
-        h.setSectionResizeMode(QHeaderView.Interactive)
-
-        for c in range(model.columnCount()):
-            try:
-                header_text = str(model.headerData(c, Qt.Horizontal, Qt.DisplayRole))
-            except Exception:
-                header_text = ""
-            max_text_len = len(header_text)
-
-            try:
-                df_in = getattr(model, "_df", None)
-                if df_in is not None and not df_in.empty:
-                    col_len = df_in.iloc[:, c].astype(str).str.len().clip(upper=40).max()
-                    if pd.notna(col_len):
-                        max_text_len = max(max_text_len, int(col_len))
-            except Exception:
-                pass
-
-            desired = max(base_min, min(int(max_text_len * char_px) + padding, max_px))
-            if h.sectionSize(c) < desired:
-                h.resizeSection(c, desired)
-
-        if cells:
-            self._sync_filter_widths(table, cells)
-        if bar is not None:
-            bar.setMinimumWidth(h.length())
-        if scroll is not None:
-            self._sync_filter_scroll(table, scroll)
+        # 2) Filtre hücreleri ve bar ile genişliği senkron tut
+        try:
+            if filter_cells:
+                for c, cell in enumerate(filter_cells):
+                    if c < header.count():
+                        cell.setFixedWidth(header.sectionSize(c))
+            if filter_bar is not None:
+                filter_bar.setMinimumWidth(header.length())
+            if scroll is not None:
+                self._sync_filter_scroll(table, scroll)
+        except Exception:
+            pass
 
     def _sync_filter_widths(self, table: QTableView, cells: list):
         if not cells:
@@ -1271,8 +1317,9 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # görünümü mevcut df ile tekrar kur
-        self._refresh_dugum_view(rebuild_filters=False)
+        # görünümü mevcut df ile tekrar kur (sütun genişliklerini bozma)
+        self._refresh_dugum_view(rebuild_filters=False, autosize=False)
+
         if self.df_running is not None:
             self.model_run.set_df(self.df_running.copy())
             self._rebuild_run_filters()
