@@ -681,7 +681,7 @@ class PlanningDialog(QDialog):
             candidates = candidates.sort_values(by=sort_cols, ascending=True)
 
         if candidates.empty:
-            return False, "Bu tarak grubunda seçilen kategoriye (DENIM/HAM) uygun atanacak iş bulunamadı."
+            return False, "Bu tarak grubunda seçilen kategoriye (DENIM/HAM) uygun atanacak iş bulunamadı.", False
 
         idx = candidates.index[0]
 
@@ -704,7 +704,7 @@ class PlanningDialog(QDialog):
                 )
             if m == QMessageBox.No:
                 self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
-                return True, f"Not nedeniyle 'Atla' olarak işaretlendi (satır {idx})."
+                return True, f"Not nedeniyle 'Atla' olarak işaretlendi (satır {idx}).", False
 
         # --- Süs kenar uyumu ---
         job_sup = ""
@@ -725,13 +725,13 @@ class PlanningDialog(QDialog):
             clicked = box.clickedButton()
             if clicked is btn_no:
                 self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
-                return True, f"Süs kenarı uyuşmazlığı nedeniyle 'Atla' olarak işaretlendi (satır {idx})."
+                return True, f"Süs kenarı uyuşmazlığı nedeniyle 'Atla' olarak işaretlendi (satır {idx}).", False
             if clicked is btn_other:
-                return False, "Başka tezgah seçin."
+                return False, "Başka tezgah seçin.", False
 
         # Atama
         self.df_jobs.at[idx, "Tezgah Numarası"] = loom_no
-        return True, f"{loom_no} tezgâha atandı (satır {idx})."
+        return True, f"{loom_no} tezgâha atandı (satır {idx}).", True
 
     def _assign_from_table(self, source: str, idx: QModelIndex):
         if not idx.isValid():
@@ -761,12 +761,13 @@ class PlanningDialog(QDialog):
                 loom_sup = str(row.get(sup_col, "")).strip()
                 break
 
-        ok, msg = self._assign_first_job(key, loom_no, loom_sup)
+        ok, msg, remove_row = self._assign_first_job(key, loom_no, loom_sup)
 
         if ok:
-            # tablodan seçilen satırı kaldır
-            new_df = df_view.drop(index=idx.row()).reset_index(drop=True)
-            model.set_df(new_df)
+            if remove_row:
+                # tablodan seçilen satırı kaldır
+                new_df = df_view.drop(index=idx.row()).reset_index(drop=True)
+                model.set_df(new_df)
 
             # üst akışa haber ver
             if callable(self.on_assign):

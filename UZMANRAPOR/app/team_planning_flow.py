@@ -146,6 +146,133 @@ def _group_all_sarmaya_hazir(sub_df: pd.DataFrame) -> bool:
     def _is_ready(s: str) -> bool:
         return ("SARMAYA HAZIR" in s) or ("SARMA" in s)
     return non_empty.apply(_is_ready).all()
+# =========================
+# Manuel tezgâh seçme diyalogu (TAKIM)
+# =========================
+class ManualTezgahPicker(QDialog):
+    """Tüm tezgah listesinden manuel seçim yapılabilen diyalog."""
+
+    def __init__(self, df_running: pd.DataFrame, df_jobs_full: pd.DataFrame | None = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manuel Tezgah Seç")
+        self.resize(820, 580)
+
+        self._df_run = df_running.copy() if df_running is not None else pd.DataFrame()
+        self._df_jobs = df_jobs_full.copy() if df_jobs_full is not None else None
+        self._df_view = pd.DataFrame()
+        self._chosen_loom: str | None = None
+
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("Tüm tezgahlar"))
+
+        self.tbl = QTableView()
+        cols = ["Tezgah", "Tarak Grubu", "Açık mı? / Kalan metre", "Tarak grubunun Kalan İş Adedi", "Kesim Tipi"]
+        self.model = PandasModel(pd.DataFrame(columns=cols))
+        self.tbl.setModel(self.model)
+        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        v.addWidget(self.tbl, 1)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("Seç")
+        self.btn_cancel = QPushButton("İptal")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_cancel)
+        v.addLayout(btns)
+
+        self.btn_ok.clicked.connect(self._on_accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.tbl.doubleClicked.connect(self._on_accept)
+
+        self._build_view()
+
+    def _jobs_total_for_tg(self, tg_norm: str) -> int:
+        if self._df_jobs is None or self._df_jobs.empty:
+            return 0
+        col_tg = _col(self._df_jobs, ["Tarak Grubu", "Tarak", "TarakGrubu"])
+        if not col_tg:
+            return 0
+        df = self._df_jobs.copy()
+        df["_TG_norm"] = df[col_tg].astype(str).apply(_norm_tarak_generic)
+        return int((df["_TG_norm"] == tg_norm).sum())
+
+    def _build_view(self):
+        cols_view = ["Tezgah", "Tarak Grubu", "Açık mı? / Kalan metre", "Tarak grubunun Kalan İş Adedi", "Kesim Tipi"]
+        run = self._df_run
+        if run is None or run.empty:
+            self.model.set_df(pd.DataFrame(columns=cols_view))
+            return
+
+        col_tz = _col(run, ["Tezgah No", "Tezgah", "Tezgah Numarası"])
+        if not col_tz:
+            self.model.set_df(pd.DataFrame(columns=cols_view))
+            return
+
+        col_tg = _col(run, ["Tarak Grubu", "Tarak", "TarakGrubu"])
+        col_kalan = _col(run, ["Kalan", "Kalan Mt", "Kalan Metre", "Kalan_Metre", "_KalanMetre"])
+        col_cut = _col(run, ["ISAVER/ROTOCUT/ISAVERKit", "ISAVER/ROTOCUT", "Kesim Tipi", "KesimTipi", "Kesim"])
+
+        r = run.copy()
+        if col_tg:
+            r["_TG_norm"] = r[col_tg].astype(str).apply(_norm_tarak_generic)
+        else:
+            r["_TG_norm"] = ""
+        if "_OpenTezgahFlag" not in r.columns:
+            r["_OpenTezgahFlag"] = False
+        if "_KalanMetreNorm" not in r.columns:
+            r["_KalanMetreNorm"] = pd.to_numeric(r[col_kalan], errors="coerce") if col_kalan else pd.NA
+
+        r["_loom_no"] = r[col_tz].apply(lambda x: (_loom_no_as_int(x) or 99999))
+        r = r.sort_values(by="_loom_no")
+
+        view_rows = []
+        for _, rr in r.iterrows():
+            tezgah = str(rr[col_tz]).strip()
+            tg_name = str(rr["_TG_norm"])
+            jobs_total = self._jobs_total_for_tg(tg_name)
+
+            if bool(rr["_OpenTezgahFlag"]):
+                acik_kalan = "AÇIK"
+            else:
+                km = rr["_KalanMetreNorm"]
+                acik_kalan = "" if pd.isna(km) else str(int(km))
+
+            kesim_tipi = ""
+            if col_cut and (col_cut in rr.index):
+                val = rr.get(col_cut, "")
+                kesim_tipi = "" if pd.isna(val) else str(val).strip()
+
+            view_rows.append({
+                "Tezgah": tezgah,
+                "Tarak Grubu": tg_name,
+                "Açık mı? / Kalan metre": acik_kalan,
+                "Tarak grubunun Kalan İş Adedi": int(jobs_total),
+                "Kesim Tipi": kesim_tipi
+            })
+
+        df_view = pd.DataFrame.from_records(view_rows, columns=cols_view)
+        self._df_view = df_view
+        self.model.set_df(df_view)
+        self.tbl.resizeColumnsToContents()
+
+    def _on_accept(self, *_):
+        tz = self.selected_tezgah()
+        if tz:
+            self._chosen_loom = str(tz)
+            self.accept()
+        else:
+            self.reject()
+
+    def selected_tezgah(self) -> str | None:
+        if getattr(self, "_chosen_loom", None):
+            return self._chosen_loom
+        idx = self.tbl.currentIndex()
+        if not idx.isValid() or self._df_view is None or self._df_view.empty:
+            return None
+        try:
+            return str(self._df_view.iloc[idx.row()]["Tezgah"]).strip()
+        except Exception:
+            return None
 
 # =========================
 # Tezgâh seçme diyalogu (TAKIM)
@@ -192,9 +319,13 @@ class TezgahPicker(QDialog):
         self.spin_thr.setSingleStep(10)
         self.spin_thr.setValue(self._thr)
         top.addWidget(self.spin_thr)
+        self.btn_manual = QPushButton("Manuel Tezgah Seç")
+        top.addStretch(1)
+        top.addWidget(self.btn_manual)
         top.addStretch(1)
         v.addLayout(top)
         self.spin_thr.valueChanged.connect(self._on_thr_changed)
+        self.btn_manual.clicked.connect(self._open_manual_picker)
 
         # tablo
         self.tbl = QTableView()
@@ -420,6 +551,14 @@ class TezgahPicker(QDialog):
         self._df_candidates = df_view
         self.model.set_df(df_view)
         self.tbl.resizeColumnsToContents()
+
+    def _open_manual_picker(self):
+        dlg = ManualTezgahPicker(self._df_run, self._df_jobs, parent=self)
+        if dlg.exec():
+            tz = dlg.selected_tezgah()
+            if tz:
+                self._chosen_loom = str(tz)
+                self.accept()
 
     def _on_accept(self, *_):
         tz = self.selected_tezgah()
