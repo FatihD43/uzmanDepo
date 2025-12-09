@@ -18,9 +18,10 @@ try:
 except Exception:
     _storage = None
 
-NEVER = {2447,2449,2451,2453,2455,2457,2459,2461,2463}
-HAM_ALLOWED = {2448,2450,2452,2454,2456,2458,2460,2462,2464} | set(range(2465, 2519))
-DENIM_ALLOWED_RANGE = (2201, 2446)
+NEVER = {2430, 2432, 2434, 2436, 2438, 2440, 2442, 2444, 2446}
+HAM_ALLOWED = set(range(2447, 2519))   # 2447–2518 arası
+DENIM_ALLOWED_RANGE = (2201, 2446)     # 2201–2446 arası
+
 
 def _loom_in_category(loom_no: int | str, category: str) -> bool:
     try:
