@@ -854,6 +854,7 @@ class TeamPlanningFlowTab(QWidget):
         col_term = _col(self.df_jobs, ["Mamül Termin","Mamul Termin","Termin","Termin Tarihi"])
         col_note = _col(self.df_jobs, ["NOTLAR","Notlar","Not"])
         col_hash = _col(self.df_jobs, ["Levent Haşıl Tarihi","Haşıl Tarihi"])
+        col_tz = _col(self.df_jobs, ["Tezgah Numarası", "Tezgah No", "Tezgah"])
 
         if not col_tg:
             return pd.DataFrame()
@@ -907,6 +908,7 @@ class TeamPlanningFlowTab(QWidget):
         # DokumaİşEmri = Üretim Sipariş No + sayaç
         order_counters = defaultdict(int)
         rows = []
+        initial_assignments: list[tuple[str, str, str, str]] = []  # (tg_norm, job_key, display, digits)
         for _, r in df.iterrows():
             ld = lev_or_durum(r)
             if ld == "":
@@ -917,8 +919,18 @@ class TeamPlanningFlowTab(QWidget):
             order_counters[order_no] += 1
             dok_is = f"{order_no}-{order_counters[order_no]}"
 
+            tezgah_disp = ""
+            if col_tz:
+                tz_raw = r.get(col_tz, "")
+                if pd.notna(tz_raw):
+                    tz_str = str(tz_raw).strip()
+                    if tz_str:
+                        tz_digits = _loom_digits(tz_str) or tz_str
+                        tezgah_disp = f"{tz_digits}  (DÜĞÜM)"
+                        initial_assignments.append((key_norm, dok_is, tezgah_disp, tz_digits))
+
             rows.append({
-                "Tezgah": "",
+                "Tezgah": tezgah_disp,
                 "Tarak Grubu": r.get(col_tg, ""),
                 "KökTip": r.get(col_kok, ""),
                 "LeventNo / Durum": ld,
@@ -970,6 +982,12 @@ class TeamPlanningFlowTab(QWidget):
             cols.insert(insert_at, "DokumaİşEmri")
             mid = mid[cols]
 
+            # Düğüm sekmesinden gelen hazır tezgah atamalarını kaydet
+            for tg_norm, job_key, tz_disp, tz_digits in initial_assignments:
+                if (tg_norm, job_key) not in self._assignments:
+                    self._assignments[(tg_norm, job_key)] = tz_disp
+                if tz_digits:
+                    self._used_looms_global.add(str(tz_digits))
         # önceki atamaları geri yaz
         try:
             if not mid.empty:

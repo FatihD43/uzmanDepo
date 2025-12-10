@@ -24,6 +24,7 @@ from app.team_planning_flow import TeamPlanningFlowTab
 from app.equipment_dialog import LoomCutEditor
 from io_layer.loaders import enrich_running_with_loom_cut, enrich_running_with_selvedge
 from app.auth import User
+from app.user_management_widget import UserManagementWidget
 
 
 def _normalize_perm_name(perm: str) -> str:
@@ -312,6 +313,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.build_kusbaki_tab(), "KUŞBAKIŞI")
         tabs.addTab(self.build_usta_tab(), "USTA DEFTERİ")
         tabs.addTab(self.build_team_flow_tab(), "TAKIM PLANLAMA (AKIŞ)")
+        if self.has_permission("admin"):
+            tabs.addTab(UserManagementWidget(self), "KULLANICI YÖNETİMİ")
         self.setCentralWidget(tabs)
 
         # --- GÖRSEL DÜZELTME BAYRAKLARI ---
