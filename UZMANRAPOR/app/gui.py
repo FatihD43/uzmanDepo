@@ -350,6 +350,8 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "btn_plan"):
             self.btn_plan.setEnabled(can_write)
+        if hasattr(self, "btn_ai_plan"):
+            self.btn_ai_plan.setEnabled(can_write)
         if hasattr(self, "btn_notes"):
             self.btn_notes.setEnabled(can_write)
         if hasattr(self, "btn_empty"):
@@ -379,15 +381,25 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         btn_clear = QPushButton("Filtreleri Kaldır")
         btn_clear.clicked.connect(self.clear_all_filters)
+
         self.btn_load_dinamik = QPushButton("Dinamik Rapor Yükle")
         self.btn_load_dinamik.clicked.connect(self.load_dinamik)
+
         self.btn_plan = QPushButton("Planlama")
         self.btn_plan.clicked.connect(self.open_planlama)
+
+        # YENİ: Yapay Zeka Planlama butonu
+        self.btn_ai_plan = QPushButton("Yapay Zeka Planlama")
+        self.btn_ai_plan.setToolTip("Dinamik + Running verisine göre otomatik atama yapar.")
+        self.btn_ai_plan.clicked.connect(self.run_ai_planning)
+
         self.btn_notes = QPushButton("NOTLAR")
         self.btn_notes.clicked.connect(self.open_notes)
+
         top.addWidget(btn_clear)
         top.addWidget(self.btn_load_dinamik)
         top.addWidget(self.btn_plan)
+        top.addWidget(self.btn_ai_plan)  # ← yeni buton
         top.addWidget(self.btn_notes)
 
         # **YENİ**: Arızalı/Bakımda ve Boş Göster listeleri düğmeleri
@@ -727,19 +739,77 @@ class MainWindow(QMainWindow):
             self._refresh_dugum_view()
             storage.save_df_snapshot(self.df_dinamik_full, "dinamik")
             self._refresh_kusbakisi()
+    # -------------------------
+    # YAPAY ZEKA PLANLAMA (İSKELET)
+    # -------------------------
+    def run_ai_planning(self):
+        """
+        Düğüm Takım sekmesindeki 'Yapay Zeka Planlama' butonundan çağrılır.
 
-    # -------------------------
-    # NOTES: diyalog ve uygulama
-    # -------------------------
-    # -------------------------
-    # NOTES: diyalog ve uygulama
-    # -------------------------
-    # -------------------------
-    # NOTES: diyalog ve uygulama
-    # -------------------------
-    # -------------------------
-    # NOTES: diyalog ve uygulama
-    # -------------------------
+        - Dinamik + Running yüklü mü kontrol eder
+        - PlanningDialog'u arka planda kullanarak
+          tüm DENIM + HAM gruplarında AUTO planlama yapar
+        - Manuel planlama akışını (Planlama butonu) hiç bozmaz
+        """
+        if not require_permission(self, "write", "Yapay zeka ile planlama yapmak için yazma yetkiniz yok."):
+            return
+
+        # Dinamik kontrolü
+        if self.df_dinamik_full is None or self.df_dinamik_full.empty:
+            QMessageBox.warning(self, "Uyarı", "Önce Dinamik raporu yükleyin.")
+            return
+
+        # Running kontrolü
+        if self.df_running is None or self.df_running.empty:
+            QMessageBox.warning(self, "Uyarı", "Önce Vardiya Online (Running Orders) dosyasını yükleyin.")
+            return
+
+        # Güncellik bayrağı (Planlama ekranıyla aynı mantık)
+        self._did_planlama = True
+        self._update_freshness_if_ready()
+
+        # Running verisini normalize / zenginleştir (manuel planlamada da kullanıyorsun)
+        try:
+            self.df_running = normalize_df_running(self.df_running.copy())
+        except Exception:
+            pass
+        try:
+            self.df_running = enrich_running_with_loom_cut(self.df_running)
+        except Exception:
+            pass
+        try:
+            self.df_running = enrich_running_with_selvedge(self.df_running)
+        except Exception:
+            pass
+
+        # PlanningDialog'u GÖSTERMEDEN, sadece beyin olarak kullanacağız
+        dlg = PlanningDialog(
+            self.df_dinamik_full,
+            self.df_running,
+            on_group_select=None,
+            on_assign=None,
+            on_list_made=None,
+            parent=self,
+        )
+
+        total_assigned = dlg.auto_plan_all_groups()
+
+        # Atamalar df_dinamik_full üzerinde yapıldı; şimdi görünümü ve snapshot'ı tazele
+        self._apply_notes_and_autonotes()
+        self._refresh_dugum_view()
+        storage.save_df_snapshot(self.df_dinamik_full, "dinamik")
+        self._refresh_kusbakisi()
+
+        QMessageBox.information(
+            self,
+            "Yapay Zeka Planlama",
+            (
+                "Otomatik planlama tamamlandı.\n\n"
+                f"Atanan iş sayısı: {total_assigned}\n"
+                "Kalan işleri istersen Planlama ekranından manuel olarak gözden geçirebilirsin."
+            )
+        )
+
     def open_notes(self):
         if not require_permission(self, "write", "Not kurallarında değişiklik yapma yetkiniz yok."):
             return

@@ -21,7 +21,59 @@ except Exception:
 NEVER = {2430, 2432, 2434, 2436, 2438, 2440, 2442, 2444, 2446}
 HAM_ALLOWED = set(range(2447, 2519))   # 2447–2518 arası
 DENIM_ALLOWED_RANGE = (2201, 2446)     # 2201–2446 arası
+def _extract_selv_teeth(val) -> int | None:
+    """Süs kenar metninden diş sayısını (ilk tamsayıyı) çıkarır."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    m = re.search(r"(\d+)", s)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
 
+
+def _selvedge_compatible_auto(job_sup: str, loom_sup: str, tarak_group: str | None = None) -> bool:
+    """
+    AUTO mod için süs kenarı uyum kontrolü.
+
+    Kurallar:
+      - Bire bir eşitse: UYUMLU
+      - Diş sayıları okunabiliyorsa:
+          * Eğer her ikisi de {8,10,18} içindeyse → UYUMLU
+          * VEYA |iş_diş - tezgah_diş| <= 2 ise  → UYUMLU
+      - Aksi halde: UYUMLU DEĞİL
+    """
+    job_sup = (job_sup or "").strip()
+    loom_sup = (loom_sup or "").strip()
+
+    # Bilgi yoksa bloklama
+    if not job_sup or not loom_sup:
+        return True
+
+    # Aynı ise direkt kabul
+    if job_sup == loom_sup:
+        return True
+
+    t_job = _extract_selv_teeth(job_sup)
+    t_loom = _extract_selv_teeth(loom_sup)
+    if t_job is None or t_loom is None:
+        # Hem farklı hem sayı parse edemediysek, riske girmeyelim
+        return False
+
+    special = {8, 10, 18}
+
+    # Özel durum: 8–10–18 üçlüsü birbiriyle uyumlu
+    if t_job in special and t_loom in special:
+        # İstersen ileride tarak_group == 56/4/194 vs. diye daha da sıkılaştırabiliriz.
+        return True
+
+    # Genel tolerans: en fazla 2 diş fark
+    return abs(t_job - t_loom) <= 2
 
 def _loom_in_category(loom_no: int | str, category: str) -> bool:
     try:
@@ -490,6 +542,120 @@ class PlanningDialog(QDialog):
             self.lst_groups_denim.addItem(str(g))
         for g in groups_ham:
             self.lst_groups_ham.addItem(str(g))
+    # --------------- AUTO PLANLAMA (tamamen sessiz, mesaj kutusu yok) ---------------
+
+    def auto_plan_all_groups(self) -> int:
+        """
+        Tüm DENIM ve HAM tarak gruplarında, boş + açılacak tezgahlara
+        AUTO mantıkla atama yapar.
+
+        Dönüş: Toplam atanan iş sayısı.
+        """
+        total_assigned = 0
+
+        # Grupları tazele
+        self._load_groups()
+
+        # Önce DENIM
+        for i in range(self.lst_groups_denim.count()):
+            item = self.lst_groups_denim.item(i)
+            if not item:
+                continue
+            group_label = str(item.text())
+            total_assigned += self._auto_plan_for_group(group_label, "DENIM")
+
+        # Sonra HAM
+        for i in range(self.lst_groups_ham.count()):
+            item = self.lst_groups_ham.item(i)
+            if not item:
+                continue
+            group_label = str(item.text())
+            total_assigned += self._auto_plan_for_group(group_label, "HAM")
+
+        return total_assigned
+
+    def _auto_plan_for_group(self, group_label: str, category: str) -> int:
+        """
+        Tek bir tarak grubu + kategori (DENIM/HAM) için:
+          - Uygun boş + açılacak tezgah listesini çıkarır,
+          - Termin önceliğine göre işleri,
+          - Her tezgaha en fazla 1 iş düşecek şekilde AUTO atar.
+        """
+        self._current_category = category
+        self._current_group_label = str(group_label)
+        key = self._current_key()
+        if not key:
+            return 0
+
+        # Bu key + kategori için uygun tezgahları hesapla (Boş + Açılacak)
+        self._load_looms_for_key_and_category(key, category)
+
+        df_free = getattr(self.model_free, "_df", pd.DataFrame())
+        df_soon = getattr(self.model_soon, "_df", pd.DataFrame())
+
+        looms = []
+        for src in (df_free, df_soon):
+            if src is None or src.empty:
+                continue
+            for _, row in src.iterrows():
+                loom_no = str(row.get("Tezgah", "")).strip()
+                if not loom_no:
+                    continue
+                loom_sup = str(row.get("Süs Kenar", "") or "").strip()
+                looms.append({"Tezgah": loom_no, "SüsKenar": loom_sup})
+
+        if not looms:
+            return 0
+
+        used_looms = set()
+        assigned_count = 0
+
+        while True:
+            # Bu grupta hâlâ atanacak iş var mı? (en güncel hâliyle)
+            df = self.df_jobs
+            mask_group = df.get("_TarakKey", "").astype(str) == str(key)
+            mask_digits = df.get("_LeventHasDigits", False)
+            tz_col = "Tezgah Numarası"
+            mask_unassigned = (df.get(tz_col, "").astype(str) == "") | (df.get(tz_col).isna())
+
+            if str(category).upper() == "HAM":
+                mask_cat = df.get("_DyeCategory", "").astype(str).str.contains("HAM", na=False)
+            else:
+                mask_cat = ~df.get("_DyeCategory", "").astype(str).str.contains("HAM", na=False)
+
+            candidates = df[mask_group & mask_digits & mask_unassigned & mask_cat].copy()
+            sort_cols = [c for c in ["Mamul Termin", "Termin", "Plan Termin"] if c in candidates.columns]
+            if sort_cols:
+                candidates = candidates.sort_values(by=sort_cols, ascending=True)
+
+            if candidates.empty:
+                break  # bu grup için iş bitti
+
+            progressed = False  # bu turda bir iş ilerledi mi? (Atama veya Atla)
+
+            for loom in looms:
+                loom_no = loom["Tezgah"]
+                if loom_no in used_looms:
+                    continue
+                loom_sup = loom["SüsKenar"]
+
+                ok, msg, remove_row = self._assign_first_job_auto(key, loom_no, loom_sup)
+
+                if ok:
+                    progressed = True
+                    if remove_row:
+                        used_looms.add(loom_no)
+                        assigned_count += 1
+                    # Bu job artık ya atandı ya Atla oldu; bir sonraki job için dış döngüye dön
+                    break
+
+                # ok == False ise (ör: süs kenarı uyumsuz) → sıradaki tezgaha bakmaya devam
+
+            if not progressed:
+                # Mevcut en öncelikli iş, kalan hiçbir tezgaha sığmıyor → bırak, manuel baksın
+                break
+
+        return assigned_count
 
     def _current_key(self) -> str:
         label = self._current_group_label
@@ -733,6 +899,80 @@ class PlanningDialog(QDialog):
         # Atama
         self.df_jobs.at[idx, "Tezgah Numarası"] = loom_no
         return True, f"{loom_no} tezgâha atandı (satır {idx}).", True
+    def _assign_first_job_auto(self, key: str, loom_no: str, loom_sup: str | None = None):
+        """
+        AUTO mod: Mesaj kutusu kullanmadan, kural bazlı atama yapar.
+
+        Dönüş:
+          ok:          Bu çağrıda bir ilerleme oldu mu? (Atama YAPILDI veya iş 'Atla' oldu) → True
+                       Hiçbir şey değişmediyse (süs kenarı uyumsuz, iş seçilemedi vb.) → False
+          msg:         Log / bilgi mesajı
+          remove_row:  Bu tezgah satırı tek iş aldı, bir daha kullanılmasın mı? (True/False)
+        """
+        df = self.df_jobs
+
+        # Aynı grup + rakamlı Levent + atanmış olmayan + kategori (DENIM/HAM) filtresi
+        mask_group = df.get("_TarakKey", "").astype(str) == str(key)
+        mask_digits = df.get("_LeventHasDigits", False)
+        tz_col = "Tezgah Numarası"
+        mask_unassigned = (df.get(tz_col, "").astype(str) == "") | (df.get(tz_col).isna())
+
+        if str(self._current_category).upper() == "HAM":
+            mask_cat = df.get("_DyeCategory", "").astype(str).str.contains("HAM", na=False)
+        else:  # DENIM
+            mask_cat = ~df.get("_DyeCategory", "").astype(str).str.contains("HAM", na=False)
+
+        candidates = df[mask_group & mask_digits & mask_unassigned & mask_cat].copy()
+
+        sort_cols = [c for c in ["Mamul Termin", "Termin", "Plan Termin"] if c in candidates.columns]
+        if sort_cols:
+            candidates = candidates.sort_values(by=sort_cols, ascending=True)
+
+        if candidates.empty:
+            return False, "Bu tarak grubunda AUTO atanacak iş bulunamadı.", False
+
+        idx = candidates.index[0]
+
+        # --- NOT / ATKI uyarıları (AUTO) ---
+        note_col = "NOTLAR" if "NOTLAR" in df.columns else None
+        job_note = str(df.at[idx, note_col]).strip() if note_col else ""
+        has_atki_issue = bool(re.search(r"ATKI\s*1\s*EKSİK|ATKI\s*2\s*EKSİK", job_note, flags=re.IGNORECASE))
+        # HERHANGİ BİR NOT VARSA → ATLA
+        if job_note and job_note.lower() not in ("", "nan", "none"):
+            self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
+            return True, f"NOTLAR dolu olduğu için iş 'Atla' yapıldı (AUTO, satır {idx}).", False
+
+        # Senin mantığın: ATKI 1/2 EKSİK ise bu işi almıyoruz → 'Atla'
+        if has_atki_issue:
+            self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
+            return True, f"ATKI eksikliği nedeniyle 'Atla' olarak işaretlendi (AUTO, satır {idx}).", False
+
+        # Diğer notlar için AUTO modda şimdilik ekstra bir şey yapmıyoruz; ileride ek kural koyabiliriz.
+
+        # --- Süs kenar uyumu (AUTO) ---
+        job_sup = ""
+        if "SÜS KENAR" in df.columns:
+            job_sup = str(df.at[idx, "SÜS KENAR"]).strip()
+        elif "Süs Kenar" in df.columns:
+            job_sup = str(df.at[idx, "Süs Kenar"]).strip()
+
+        current_sup = (loom_sup or "").strip()
+
+        tarak_group = ""
+        if "Tarak Grubu" in df.columns:
+            tarak_group = str(df.at[idx, "Tarak Grubu"])
+
+        if job_sup and current_sup:
+            if not _selvedge_compatible_auto(job_sup, current_sup, tarak_group):
+                # Bu tezgah bu iş için uygun değil → İş ve tezgah değişmedi
+                return False, (
+                    f"Süs kenarı uyumsuz (iş: {job_sup}, tezgah: {current_sup}) (AUTO, satır {idx})."
+                ), False
+
+        # --- Atama ---
+        self.df_jobs.at[idx, "Tezgah Numarası"] = loom_no
+        return True, f"{loom_no} tezgaha atandı (AUTO, satır {idx}).", True
+
 
     def _assign_from_table(self, source: str, idx: QModelIndex):
         if not idx.isValid():
