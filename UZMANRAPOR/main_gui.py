@@ -4,6 +4,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from PySide6.QtWidgets import QApplication, QDialog
 from app.gui import MainWindow
 from app.login_dialog import LoginDialog
+from app.itema_tab import ItemaAyarTab
+
 def main():
     app = QApplication(sys.argv)
     login = LoginDialog()

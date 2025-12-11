@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QSettings
 from typing import Any
 
+from app.itema_tab import ItemaAyarTab
 from app.models import PandasModel
 from app.filter_proxy import MultiColumnFilterProxy
 from io_layer.loaders import load_dinamik_any, load_running_orders, VISIBLE_COLUMNS, HEADER_ALIASES
@@ -313,6 +314,10 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.build_kusbaki_tab(), "KUŞBAKIŞI")
         tabs.addTab(self.build_usta_tab(), "USTA DEFTERİ")
         tabs.addTab(self.build_team_flow_tab(), "TAKIM PLANLAMA (AKIŞ)")
+
+        # YENİ: ITEMA AYAR FORMU sekmesi
+        tabs.addTab(ItemaAyarTab(self), "ITEMA AYAR FORMU")
+
         if self.has_permission("admin"):
             tabs.addTab(UserManagementWidget(self), "KULLANICI YÖNETİMİ")
         self.setCentralWidget(tabs)

@@ -43,10 +43,7 @@ class LoginDialog(QDialog):
         form.addRow("Şifre", self.ed_password)
         layout.addLayout(form)
 
-        self.lbl_hint = QLabel(
-        "Varsayılan kullanıcı: <b>admin</b> / <b>admin</b><br>"
-        "Kullanıcılar SQL veritabanında saklanır."
-        )
+        self.lbl_hint = QLabel("Size verilen şifre UzmanRapor'a özeldir")
         self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.lbl_hint.setStyleSheet("color: #555; font-size: 11px;")
