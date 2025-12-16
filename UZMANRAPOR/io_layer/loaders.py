@@ -210,27 +210,35 @@ def load_dinamik_any(path: str|Path) -> pd.DataFrame:
     return df
 def _combine_yarn_with_number(df: pd.DataFrame, yarn_col: str, num_col: str) -> pd.DataFrame:
     """
-    Excel'de:
-      - num_col: 'Atkı İplik No 1', 'Atkı İplik No 2', 'Çözgü İplik No 1', 'Çözgü İplik No 2'
-      - yarn_col: 'Atkı İpliği 1', 'Atkı İpliği 2', 'Çözgü İpliği 1', 'Çözgü İpliği 2'
-
-    Hücreyi şu forma çevirir:
-        '<num> <yarn>'
-    örn: '150 RS0000269', '9/1 EKC000593'
+    '<num> <yarn>' birleştirir.
+    NaN/None/'nan' gibi değerleri kesinlikle yazmaz.
     """
     if yarn_col not in df.columns or num_col not in df.columns:
         return df
 
-    ser_num = df[num_col].astype(str).fillna("").str.strip()
-    ser_yarn = df[yarn_col].astype(str).fillna("").str.strip()
+    def _clean_series(s: pd.Series) -> pd.Series:
+        # 1) Gerçek NaN/None -> ""
+        s = s.fillna("")
+        # 2) Stringe çevir
+        s = s.astype(str).str.strip()
+        # 3) 'nan', 'none', 'null' gibi literal stringleri de temizle
+        s = s.replace({"nan": "", "NaN": "", "None": "", "NONE": "", "null": "", "NULL": ""})
+        return s
 
-    # Hem numara hem iplik kodu doluysa "num + boşluk + kod"
+    ser_num = _clean_series(df[num_col])
+    ser_yarn = _clean_series(df[yarn_col])
+
     combined = ser_yarn.copy()
     mask = (ser_num != "") & (ser_yarn != "")
     combined[mask] = ser_num[mask] + " " + ser_yarn[mask]
 
+    # num var ama yarn yoksa: sadece num yazmak istersen aç
+    # mask2 = (ser_num != "") & (ser_yarn == "")
+    # combined[mask2] = ser_num[mask2]
+
     df[yarn_col] = combined
     return df
+
 
 def load_running_orders(path: str|Path) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=0, engine="openpyxl")
