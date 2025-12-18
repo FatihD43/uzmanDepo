@@ -831,3 +831,43 @@ def count_usta_between(
         pass
 
     return 0
+def fetch_tip_buzulme_model(tip_kodlari: list[str]) -> pd.DataFrame:
+    """
+    dbo.TipBuzulmeModel tablosundan TipKodu bazında:
+      TipKodu, GecmisBuzulme, SistemBuzulme, GuvenAraligi
+    döndürür.
+
+    tip_kodlari boşsa boş df döner.
+    """
+    tips = [str(x).strip() for x in (tip_kodlari or []) if str(x).strip()]
+    if not tips:
+        return pd.DataFrame(columns=["TipKodu", "GecmisBuzulme", "SistemBuzulme", "GuvenAraligi"])
+
+    # IN param limitlerine takılmamak için parça parça çek
+    out_frames: list[pd.DataFrame] = []
+    chunk = 800  # güvenli
+    sql_tpl = """
+    SELECT TipKodu, GecmisBuzulme, SistemBuzulme, GuvenAraligi
+    FROM dbo.TipBuzulmeModel
+    WHERE TipKodu IN ({})
+    """
+
+    try:
+        with _sql_conn() as c:
+            for i in range(0, len(tips), chunk):
+                part = tips[i:i+chunk]
+                placeholders = ",".join(["?"] * len(part))
+                sql = sql_tpl.format(placeholders)
+                df = pd.read_sql(sql, c, params=part)
+                out_frames.append(df)
+    except Exception:
+        return pd.DataFrame(columns=["TipKodu", "GecmisBuzulme", "SistemBuzulme", "GuvenAraligi"])
+
+    if not out_frames:
+        return pd.DataFrame(columns=["TipKodu", "GecmisBuzulme", "SistemBuzulme", "GuvenAraligi"])
+
+    res = pd.concat(out_frames, ignore_index=True)
+    # TipKodu tekilleştir
+    res = res.drop_duplicates(subset=["TipKodu"], keep="last")
+    return res
+

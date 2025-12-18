@@ -26,6 +26,8 @@ from app.equipment_dialog import LoomCutEditor
 from io_layer.loaders import enrich_running_with_loom_cut, enrich_running_with_selvedge
 from app.auth import User
 from app.user_management_widget import UserManagementWidget
+from app.buzulme_metreuyum_tab import BuzulmeMetreUyumTab
+
 
 
 def _normalize_perm_name(perm: str) -> str:
@@ -314,6 +316,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.build_kusbaki_tab(), "KUŞBAKIŞI")
         tabs.addTab(self.build_usta_tab(), "USTA DEFTERİ")
         tabs.addTab(self.build_team_flow_tab(), "TAKIM PLANLAMA (AKIŞ)")
+        tabs.addTab(BuzulmeMetreUyumTab(self), "BÜZÜLME & METRE UYUM")
 
         # YENİ: ITEMA AYAR FORMU sekmesi
         tabs.addTab(ItemaAyarTab(self), "ITEMA AYAR FORMU")
@@ -377,6 +380,14 @@ class MainWindow(QMainWindow):
                 self.team_flow.set_write_enabled(can_write)
             except Exception:
                 pass
+        # diğer tablar...
+        for i in range(self.centralWidget().count()):
+            w = self.centralWidget().widget(i)
+            if hasattr(w, "apply_permissions"):
+                try:
+                    w.apply_permissions()
+                except Exception:
+                    pass
 
     # -------------------------
     # DÜĞÜM SEKME
