@@ -23,6 +23,8 @@ class PandasModel(QAbstractTableModel):
         super().__init__(parent)
         self._df = df
         self._highlight = highlight_assigned
+        self._header_overrides: dict[int, str] = {}
+
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if self._df is None else len(self._df)
@@ -114,13 +116,26 @@ class PandasModel(QAbstractTableModel):
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role != Qt.DisplayRole or self._df is None:
             return None
+
         if orientation == Qt.Horizontal:
+            # >>> YENİ: Override varsa onu göster (ör. \n ile çok satırlı)
+            try:
+                if isinstance(self._header_overrides, dict) and section in self._header_overrides:
+                    return self._header_overrides[section]
+            except Exception:
+                pass
             return str(self._df.columns[section])
+
         return str(section + 1)
 
     def set_df(self, df):
         self.beginResetModel()
         self._df = df
+        # >>> Yeni DF geldiğinde eski wrap'leri taşımayalım
+        try:
+            self._header_overrides = {}
+        except Exception:
+            pass
         self.endResetModel()
 
     def notify_rows(self, row_indices: list[int]) -> None:
@@ -139,3 +154,10 @@ class PandasModel(QAbstractTableModel):
         tl = self.index(0, 0)
         br = self.index(self.rowCount() - 1, self.columnCount() - 1)
         self.dataChanged.emit(tl, br, [Qt.DisplayRole, Qt.BackgroundRole])
+    def set_header_override(self, section: int, text: str) -> None:
+        if not hasattr(self, "_header_overrides") or self._header_overrides is None:
+            self._header_overrides = {}
+        self._header_overrides[int(section)] = str(text)
+
+    def clear_header_overrides(self) -> None:
+        self._header_overrides = {}

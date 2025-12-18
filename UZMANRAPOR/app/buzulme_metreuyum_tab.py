@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import re
+import textwrap
 import pandas as pd
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
-    QLabel, QTableView, QMessageBox
+    QLabel, QTableView, QMessageBox, QScrollArea, QLineEdit, QSizePolicy,
+    QHeaderView, QStyleOptionHeader, QStyle, QComboBox
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QTimer, QEvent, QRect
+from PySide6.QtGui import QFont, QTextDocument
+
 
 from app.models import PandasModel
 from app.filter_proxy import MultiColumnFilterProxy
@@ -41,6 +44,71 @@ def _clean_col(c: object) -> str:
     return s
 
 
+class WrapHeaderView(QHeaderView):
+    """
+    Bu sekmeye özel: Sütun başlıklarını 3 satıra kadar word-wrap ile çizer.
+    QHeaderView'in '...' (elide) davranışını bypass eder.
+    """
+    def __init__(self, orientation, parent=None, max_lines: int = 3):
+        super().__init__(orientation, parent)
+        self._labels: list[str] = []
+        self._max_lines = max_lines
+        self.setDefaultAlignment(Qt.AlignCenter)
+        self.setStretchLastSection(False)
+
+        # elide istemiyoruz (paintSection zaten kendisi çizecek)
+        try:
+            self.setTextElideMode(Qt.ElideNone)
+        except Exception:
+            pass
+
+    def set_labels(self, labels: list[str]) -> None:
+        self._labels = [str(x) for x in (labels or [])]
+        self.viewport().update()
+        self.updateGeometry()
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        fm = self.fontMetrics()
+        sh.setHeight(int(fm.height() * self._max_lines + 14))
+        return sh
+
+    def paintSection(self, painter, rect, logicalIndex):
+        if not rect.isValid():
+            return
+
+        opt = QStyleOptionHeader()
+        self.initStyleOption(opt)
+        opt.rect = rect
+        opt.section = logicalIndex
+
+        # Varsayılan header arka plan/çizgiler
+        self.style().drawControl(QStyle.CE_Header, opt, painter, self)
+
+        # Başlık metni (bizim label override varsa onu kullan)
+        text = ""
+        if 0 <= logicalIndex < len(self._labels):
+            text = self._labels[logicalIndex]
+        else:
+            m = self.model()
+            if m is not None:
+                v = m.headerData(logicalIndex, self.orientation(), Qt.DisplayRole)
+                text = "" if v is None else str(v)
+
+        # Word-wrap çizimi
+        doc = QTextDocument()
+        doc.setDefaultFont(self.font())
+        doc.setTextWidth(max(10, rect.width() - 8))
+        doc.setPlainText(text)
+
+        painter.save()
+        painter.translate(rect.left() + 4, rect.top() + 4)
+        clip = QRect(0, 0, max(10, rect.width() - 8), max(10, rect.height() - 8))
+        painter.setClipRect(clip)
+        doc.drawContents(painter)
+        painter.restore()
+
+
 class BuzulmeMetreUyumTab(QWidget):
     """
     Taslağa birebir:
@@ -58,6 +126,24 @@ class BuzulmeMetreUyumTab(QWidget):
 
         # Üst bar
         top = QHBoxLayout()
+        # --- Üst bar filtreleri (ComboBox) ---
+        self.cmb_bolum = QComboBox()
+        self.cmb_bolum.addItems([
+            "HEPSİ",
+            "İSKO14 (DK14)",
+            "İSKO11 (DK11)",
+            "MEKİKLİ (DK98)",
+        ])
+        self.cmb_bolum.currentTextChanged.connect(self._on_bolum_combo_changed)
+
+        self.cmb_durum = QComboBox()
+        self.cmb_durum.addItems([
+            "HEPSİ",
+            "Devam ediyor",
+            "Bitmiş",
+        ])
+        self.cmb_durum.currentTextChanged.connect(self._on_durum_combo_changed)
+
         self.btn_load = QPushButton("ZPPR0308 Yükle")
         self.btn_load.clicked.connect(self.load_zppr0308)
 
@@ -72,17 +158,63 @@ class BuzulmeMetreUyumTab(QWidget):
 
         top.addWidget(self.btn_load)
         top.addWidget(self.btn_refresh)
+
+        top.addSpacing(12)
+        top.addWidget(QLabel("Bölüm:"))
+        top.addWidget(self.cmb_bolum)
+
+        top.addSpacing(12)
+        top.addWidget(QLabel("Durum:"))
+        top.addWidget(self.cmb_durum)
+
         top.addStretch(1)
         top.addWidget(self.lbl_info)
 
         # Tablo
+        self.filter_scroll = QScrollArea()
+        self.filter_scroll.setWidgetResizable(True)
+        self.filter_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.filter_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.filter_bar = QWidget()
+        self.filter_bar_layout = QHBoxLayout(self.filter_bar)
+        self.filter_bar_layout.setContentsMargins(0, 0, 0, 0)
+        self.filter_bar_layout.setSpacing(2)
+        self.filter_scroll.setWidget(self.filter_bar)
+
         self.tbl = QTableView()
+        self.tbl.setSortingEnabled(True)
+
+        # >>> Sadece bu sekmede: wrap header
+        self.wrap_header = WrapHeaderView(Qt.Horizontal, self.tbl, max_lines=3)
+        self.tbl.setHorizontalHeader(self.wrap_header)
+
         self.model = PandasModel(pd.DataFrame())
         self.proxy = MultiColumnFilterProxy(self)
         self.proxy.setSourceModel(self.model)
         self.tbl.setModel(self.proxy)
 
+        self._filter_edits: list[QLineEdit] = []
+        self._scroll_from_table = False
+        self._scroll_from_filter = False
+
+        header = self.tbl.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.sectionResized.connect(self._sync_filter_widths)
+        header.sectionResized.connect(lambda *_: self._schedule_header_rewrap())
+        header.sectionCountChanged.connect(lambda *_: self._rebuild_filters())
+        header.geometriesChanged.connect(self._sync_filter_widths)
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setMinimumSectionSize(90)
+        self.tbl.viewport().installEventFilter(self)
+        self._auto_fit_pending = False
+        self.tbl.horizontalScrollBar().valueChanged.connect(self._sync_filter_scroll_from_table)
+        self.filter_scroll.horizontalScrollBar().valueChanged.connect(self._sync_filter_scroll_from_filter)
+        self.proxy.layoutChanged.connect(self._schedule_span_update)
+        self.proxy.modelReset.connect(self._schedule_span_update)
+
         v.addLayout(top)
+        v.addWidget(self.filter_scroll)
         v.addWidget(self.tbl, 1)
 
         self.apply_permissions()
@@ -125,10 +257,8 @@ class BuzulmeMetreUyumTab(QWidget):
     def _run_pipeline(self, path: str):
         try:
             df_raw = pd.read_excel(path)
-
             # >>> KOLON ADLARINI TEMİZLE (kritik)
             df_raw.columns = [_clean_col(c) for c in df_raw.columns]
-
         except Exception as e:
             QMessageBox.critical(self, "Hata", f"Dosya okunamadı:\n{e}")
             return
@@ -140,6 +270,10 @@ class BuzulmeMetreUyumTab(QWidget):
             return
 
         self.model.set_df(out)
+        self._rebuild_filters()
+        QTimer.singleShot(0, self._apply_combo_filters)
+        self._schedule_span_update()
+        self._apply_header_wrapping()  # >>> burada wrap header label'larını basıyoruz
 
         try:
             n_isemri = out["Dokuma İş Emri"].nunique() if "Dokuma İş Emri" in out.columns else len(out)
@@ -149,6 +283,9 @@ class BuzulmeMetreUyumTab(QWidget):
             self.lbl_info.setText(f"Satır: {len(out)}")
 
         QTimer.singleShot(0, lambda: self.tbl.resizeColumnsToContents())
+        QTimer.singleShot(0, self._sync_filter_widths)
+        QTimer.singleShot(0, self._schedule_auto_fit)
+        QTimer.singleShot(0, self._schedule_header_rewrap)  # resize sonrası tekrar wrap
 
     def _build_output(self, df: pd.DataFrame) -> pd.DataFrame:
         # ---- Taslak kolon eşleştirmeleri ----
@@ -170,7 +307,6 @@ class BuzulmeMetreUyumTab(QWidget):
 
         col_tip = _col_pick(df, ["Tip Kodu", "Malzeme", "Mamul", "Mamul Tipi"])
         col_hedef = _col_pick(df, ["Dokuma Hedef Metre", "Dokuma Hdf Mik", "Dokuma Hdf", "Dokuma Hedef"])
-
         col_etiket = _col_pick(df, ["Etiket Numarası", "Etiket No", "Etiket", "Etiket Numarasi"])
 
         # Taslak: İhrazat Tyt Mik
@@ -202,7 +338,6 @@ class BuzulmeMetreUyumTab(QWidget):
             ("Dokuma Tyt Mik", col_dok_m),
         ] if c is None]
         if missing:
-            # Kolonları da gösterelim ki bir daha mapping kaçırmayalım
             cols_preview = "\n".join(map(str, df.columns))
             raise ValueError(
                 "ZPPR0308 içinde gerekli kolon(lar) bulunamadı: "
@@ -244,10 +379,10 @@ class BuzulmeMetreUyumTab(QWidget):
         out["Hedefe Uyum %"] = (out["Dokuma Proses Kartı Alınmış Toplam Metre"] / out["Dokuma Hedef Metre"]) * 100.0
 
         # Taslağa birebir formül:
-        # 100 - ((DokumaToplam / İhzaratToplam) * 100)
         out["Bu İş Emrinin Büzülmesi"] = 100.0 - (
             (out["Dokuma Proses Kartı Alınmış Toplam Metre"] / out["_ihz_top"]) * 100.0
         )
+
 
         # ---- Durum kuralı (taslağa birebir) ----
         def _durum_for_group(s: pd.Series) -> str:
@@ -257,6 +392,8 @@ class BuzulmeMetreUyumTab(QWidget):
 
         durum_map = g["Dokuma Etiket Bazında Proses Kartı Alınmış Metre"].apply(_durum_for_group)
         out["Durum"] = out["Dokuma İş Emri"].map(durum_map)
+        # Devam eden iş emirlerinde büzülme değeri görünmesin (tamamlanmadığı için yanıltır)
+        out.loc[out["Durum"] == "Devam ediyor", "Bu İş Emrinin Büzülmesi"] = pd.NA
 
         # ---- SQL join: dbo.TipBuzulmeModel ----
         tips = out["Tip Kodu"].astype(str).fillna("").unique().tolist()
@@ -313,4 +450,275 @@ class BuzulmeMetreUyumTab(QWidget):
         rest = [c for c in out.columns if c not in keep]
         out = out[keep + rest]
 
+        if "Dokuma İş Emri" in out.columns:
+            sort_cols = ["Dokuma İş Emri"]
+            if "Etiket Numarası" in out.columns:
+                sort_cols.append("Etiket Numarası")
+            out = out.sort_values(by=sort_cols, kind="stable").reset_index(drop=True)
+
         return out
+
+    def _rebuild_filters(self):
+        # Sil
+        while self.filter_bar_layout.count():
+            item = self.filter_bar_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._filter_edits.clear()
+
+        cols = list(self.model._df.columns) if (self.model and self.model._df is not None) else []
+        header = self.tbl.horizontalHeader()
+
+        for c, name in enumerate(cols):
+            edit = QLineEdit()
+            edit.setPlaceholderText(str(name))
+            edit.textChanged.connect(lambda text, col=c: self._on_filter_changed(col, text))
+            edit.setFixedWidth(header.sectionSize(c))
+            edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+            self.filter_bar_layout.addWidget(edit)
+            self._filter_edits.append(edit)
+
+        self._sync_filter_widths()
+
+    def _on_filter_changed(self, col: int, text: str):
+        self.proxy.setFilterForColumn(col, text)
+        self._schedule_span_update()
+    def _set_filter_by_colname(self, col_name: str, text: str) -> None:
+        """
+        Combo filtrelerini, ilgili kolonun QLineEdit filtre kutusuna yazar.
+        Böylece hem proxy hem UI senkron kalır.
+        """
+        if not self.model or self.model._df is None or self.model._df.empty:
+            return
+
+        cols = list(self.model._df.columns)
+        if col_name not in cols:
+            return
+
+        col_idx = cols.index(col_name)
+
+        # Filter bar hazırsa, edit'e yaz; değilse direkt proxy'ye yaz
+        if 0 <= col_idx < len(self._filter_edits):
+            edit = self._filter_edits[col_idx]
+            old = edit.blockSignals(True)
+            edit.setText(text)
+            edit.blockSignals(old)
+            # manuel tetikle
+            self.proxy.setFilterForColumn(col_idx, text)
+            self._schedule_span_update()
+        else:
+            self.proxy.setFilterForColumn(col_idx, text)
+            self._schedule_span_update()
+
+    def _apply_combo_filters(self) -> None:
+        # Bölüm filtresi
+        b = self.cmb_bolum.currentText().strip() if hasattr(self, "cmb_bolum") else "HEPSİ"
+        if b == "İSKO14 (DK14)":
+            self._set_filter_by_colname("Bölüm", "DK14")
+        elif b == "İSKO11 (DK11)":
+            self._set_filter_by_colname("Bölüm", "DK11")
+        elif b == "MEKİKLİ (DK98)":
+            self._set_filter_by_colname("Bölüm", "DK98")
+        else:
+            self._set_filter_by_colname("Bölüm", "")
+
+        # Durum filtresi
+        d = self.cmb_durum.currentText().strip() if hasattr(self, "cmb_durum") else "HEPSİ"
+        if d == "Devam ediyor":
+            self._set_filter_by_colname("Durum", "Devam ediyor")
+        elif d == "Bitmiş":
+            # senin Durum metnin: "Dokuması bitmiş İş Emrini Kontrol Ederek Kapattır"
+            # bunu yakalamak için en güvenli anahtar kelime:
+            self._set_filter_by_colname("Durum", "Kapattır")
+        else:
+            self._set_filter_by_colname("Durum", "")
+
+    def _on_bolum_combo_changed(self, _text: str) -> None:
+        self._apply_combo_filters()
+
+    def _on_durum_combo_changed(self, _text: str) -> None:
+        self._apply_combo_filters()
+
+
+    def _sync_filter_widths(self):
+        header = self.tbl.horizontalHeader()
+        for c, edit in enumerate(self._filter_edits):
+            if c < header.count():
+                edit.setFixedWidth(header.sectionSize(c))
+        try:
+            self.filter_bar.setMinimumWidth(header.length())
+        except Exception:
+            pass
+
+        # Wrap header yüksekliğini set et (WrapHeaderView sizeHint)
+        try:
+            header.setFixedHeight(self.wrap_header.sizeHint().height())
+        except Exception:
+            pass
+
+        # Sütun genişliği değişince başlıkları yeniden çiz
+        self._schedule_header_rewrap()
+
+    def _sync_filter_scroll_from_table(self, value: int):
+        if self._scroll_from_filter:
+            return
+        self._scroll_from_table = True
+        self.filter_scroll.horizontalScrollBar().setValue(value)
+        self._scroll_from_table = False
+
+    def _sync_filter_scroll_from_filter(self, value: int):
+        if self._scroll_from_table:
+            return
+        self._scroll_from_filter = True
+        self.tbl.horizontalScrollBar().setValue(value)
+        self._scroll_from_filter = False
+
+    def _schedule_span_update(self):
+        QTimer.singleShot(0, self._apply_spans)
+
+    def _schedule_header_rewrap(self):
+        QTimer.singleShot(0, self._apply_header_wrapping)
+
+    def eventFilter(self, obj, event):
+        # tablo viewport resize olunca kolonları ekrana göre yeniden dağıt
+        if obj is self.tbl.viewport() and event.type() == QEvent.Type.Resize:
+            self._schedule_auto_fit()
+        return super().eventFilter(obj, event)
+
+    def _schedule_auto_fit(self):
+        if getattr(self, "_auto_fit_pending", False):
+            return
+        self._auto_fit_pending = True
+        QTimer.singleShot(0, self._auto_fit_columns_to_viewport)
+
+    def _auto_fit_columns_to_viewport(self):
+        self._auto_fit_pending = False
+
+        if not self.model or self.model._df is None or self.model._df.empty:
+            return
+
+        header = self.tbl.horizontalHeader()
+        vp_w = self.tbl.viewport().width()
+        if vp_w <= 0:
+            return
+
+        cols = list(self.model._df.columns)
+        n = len(cols)
+        if n == 0:
+            return
+
+        # Mevcut kolon genişlikleri
+        sizes = [header.sectionSize(i) for i in range(n)]
+        total = sum(sizes)
+
+        # Çok küçük bir margin/padding payı
+        margin = 24
+        target = max(0, vp_w - margin)
+
+        # Eğer toplam zaten büyükse (sığmıyorsa) zorlamayalım, scroll devam etsin
+        if total >= target:
+            # yine de başlıkları mevcut genişliğe göre wrap et
+            self._schedule_header_rewrap()
+            return
+
+        # Boşluk varsa dağıtalım (oransal)
+        extra = target - total
+        base_sum = max(1, total)
+
+        for i in range(n):
+            add = int(extra * (sizes[i] / base_sum))
+            header.resizeSection(i, sizes[i] + add)
+
+        # Son küçük farkı son kolona verelim
+        new_total = sum(header.sectionSize(i) for i in range(n))
+        diff = target - new_total
+        if diff != 0 and n > 0:
+            header.resizeSection(n - 1, max(40, header.sectionSize(n - 1) + diff))
+
+        # Filtre kutularını senkronla + başlıkları yeni genişliğe göre wrap et
+        self._sync_filter_widths()
+        self._schedule_header_rewrap()
+
+    def _apply_spans(self):
+        self.tbl.clearSpans()
+        if not self.model or self.model._df is None or self.model._df.empty:
+            return
+
+        cols = list(self.model._df.columns)
+        try:
+            isemri_idx = cols.index("Dokuma İş Emri")
+        except ValueError:
+            return
+
+        merge_names = [
+            "Bölüm",
+            "Dokuma İş Emri",
+            "İhzarat İşemri",
+            "Tip Kodu",
+            "Dokuma Hedef Metre",
+            "Dokuma Proses Kartı Alınmış Toplam Metre",
+            "Hedefe Uyum %",
+            "Bu İş Emrinin Büzülmesi",
+            "SAP de Sistemdeki Büzülme",
+            "Geçmiş Yıllardaki Fiili Büzülme(Son2Yıl)",
+            "Güven Aralığı",
+            "Durum",
+        ]
+        merge_indices = [cols.index(name) for name in merge_names if name in cols]
+        if not merge_indices:
+            return
+
+        row_count = self.proxy.rowCount()
+        if row_count == 0:
+            return
+
+        def _cell_value(row: int, col: int):
+            idx = self.proxy.index(row, col)
+            return idx.data(Qt.DisplayRole) if idx.isValid() else None
+
+        current_value = _cell_value(0, isemri_idx)
+        start = 0
+        for r in range(1, row_count + 1):
+            next_value = _cell_value(r, isemri_idx) if r < row_count else None
+            if next_value != current_value:
+                span_len = r - start
+                if span_len > 1:
+                    for col in merge_indices:
+                        self.tbl.setSpan(start, col, span_len, 1)
+                start = r
+                current_value = next_value
+
+    def _apply_header_wrapping(self):
+        if not hasattr(self, "wrap_header"):
+            return
+
+        if not self.model or self.model._df is None:
+            return
+
+        cols = list(self.model._df.columns)
+
+        # Güvenlik: boş kalmasın
+        if not cols:
+            self.wrap_header.set_labels([])
+            return
+
+        wrapped = [
+            self._wrap_header_label(str(name), width=18, max_lines=3)
+            for name in cols
+        ]
+
+        self.wrap_header.set_labels(wrapped)
+        self.wrap_header.setFixedHeight(self.wrap_header.sizeHint().height())
+
+    @staticmethod
+    def _wrap_header_label(text: str, width: int = 18, max_lines: int = 3) -> str:
+        lines = textwrap.wrap(text, width=width) if text else []
+        if not lines:
+            return text
+        if len(lines) <= max_lines:
+            return "\n".join(lines)
+        head = lines[: max_lines - 1]
+        tail = " ".join(lines[max_lines - 1:])
+        return "\n".join(head + [tail])

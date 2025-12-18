@@ -858,6 +858,13 @@ def fetch_tip_buzulme_model(tip_kodlari: list[str]) -> pd.DataFrame:
                 part = tips[i:i+chunk]
                 placeholders = ",".join(["?"] * len(part))
                 sql = sql_tpl.format(placeholders)
+                import warnings
+                warnings.filterwarnings(
+                    "ignore",
+                    message="pandas only supports SQLAlchemy connectable.*",
+                    category=UserWarning,
+                )
+
                 df = pd.read_sql(sql, c, params=part)
                 out_frames.append(df)
     except Exception:
