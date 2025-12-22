@@ -831,6 +831,54 @@ def count_usta_between(
         pass
 
     return 0
+
+def load_usta_etiket_tezgah_map() -> dict[str, str]:
+        """
+        UstaDefteri tablosundaki EtiketNo → Tezgah eşleşmesini (en güncel kayıt öncelikli) döndürür.
+
+        İsimler metin olarak normalize edilir; boş/NaN değerler hariç tutulur.
+        """
+
+        def _clean(val) -> str:
+            if val is None:
+                return ""
+            try:
+                if isinstance(val, float) and pd.isna(val):
+                    return ""
+            except Exception:
+                pass
+
+            s = str(val).strip()
+            if not s:
+                return ""
+            # "1234.0" → "1234"
+            s = re.sub(r"\.0+$", "", s)
+            return s
+
+        sql = """
+        SELECT EtiketNo, Tezgah
+        FROM dbo.UstaDefteri
+        WHERE EtiketNo IS NOT NULL AND LTRIM(RTRIM(EtiketNo)) <> ''
+        ORDER BY Id DESC;
+        """
+
+        try:
+            with _sql_conn() as c:
+                cur = c.cursor()
+                cur.execute(sql)
+                rows = cur.fetchall()
+        except Exception:
+            return {}
+
+        mapping: dict[str, str] = {}
+        for row in rows:
+            etiket = _clean(row[0] if len(row) > 0 else None)
+            tezgah = _clean(row[1] if len(row) > 1 else None)
+            if not etiket or not tezgah:
+                continue
+            # Id DESC ile geldiği için ilk denk gelen en güncel; daha eski kayıtları ezme.
+            mapping.setdefault(etiket, tezgah)
+        return mapping
 def fetch_tip_buzulme_model(tip_kodlari: list[str]) -> pd.DataFrame:
     """
     dbo.TipBuzulmeModel tablosundan TipKodu bazında:

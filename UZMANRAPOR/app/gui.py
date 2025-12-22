@@ -935,6 +935,95 @@ class MainWindow(QMainWindow):
 
         return df
 
+    def _clean_label_value(self, val: Any) -> str:
+        if val is None:
+            return ""
+        try:
+            if isinstance(val, float) and pd.isna(val):
+                return ""
+        except Exception:
+            pass
+
+        s = str(val).strip()
+        if not s:
+            return ""
+        s = s.replace("\n", " ").replace("\r", " ")
+        s = re.sub(r"\.0+$", "", s)
+        if s.lower() in {"nan", "nat"}:
+            return ""
+        return s
+
+    def _running_barkod_tezgah_map(self) -> dict[str, str]:
+        df_run = getattr(self, "df_running", None)
+        if df_run is None or df_run.empty:
+            return {}
+
+        barkod_col = None
+        for c in df_run.columns:
+            if "BARKOD" in str(c).upper():
+                barkod_col = c
+                break
+        if barkod_col is None:
+            return {}
+
+        tez_col = next((c for c in ["Tezgah No", "Tezgah", "Tezgah Numarası"] if c in df_run.columns), None)
+        if tez_col is None:
+            for c in df_run.columns:
+                if "TEZGAH" in str(c).upper():
+                    tez_col = c
+                    break
+        if tez_col is None:
+            return {}
+
+        mapping: dict[str, str] = {}
+        try:
+            subset = df_run[[barkod_col, tez_col]]
+        except Exception:
+            return {}
+
+        for _, row in subset.iterrows():
+            label = self._clean_label_value(row.get(barkod_col))
+            loom = self._clean_label_value(row.get(tez_col))
+            if label and loom and label not in mapping:
+                mapping[label] = loom
+        return mapping
+
+    def _apply_etiket_location_notes(self, df: pd.DataFrame) -> pd.DataFrame:
+        etiket_col = next((c for c in ["Levent Etiket FA", "EtiketFA", "Etiket No"] if c in df.columns), None)
+        if etiket_col is None:
+            return df
+
+        if "NOTLAR" not in df.columns:
+            df["NOTLAR"] = ""
+
+        try:
+            usta_map = storage.load_usta_etiket_tezgah_map()
+        except Exception:
+            usta_map = {}
+        running_map = self._running_barkod_tezgah_map()
+
+        if not usta_map and not running_map:
+            return df
+
+        def _find_machine(label: Any) -> str:
+            key = self._clean_label_value(label)
+            if not key:
+                return ""
+            if key in usta_map:
+                return self._clean_label_value(usta_map.get(key))
+            if key in running_map:
+                return self._clean_label_value(running_map.get(key))
+            return ""
+
+        for idx, label in df[etiket_col].items():
+            loom = _find_machine(label)
+            if not loom:
+                continue
+            note_text = f"{loom} NOLU TEZGAHA ALINDI"
+            df.at[idx, "NOTLAR"] = self._append_note(df.at[idx, "NOTLAR"], note_text)
+
+        return df
+
     def _apply_notes_and_autonotes(self):
         """
         NOTLAR sütununu her seferinde TEMİZDEN hesapla:
@@ -965,7 +1054,10 @@ class MainWindow(QMainWindow):
         # 1) Otomatik ATKI eksikliği notları
         df = self._apply_auto_atki_notes(df)
 
-        # 2) Senin tanımladığın manuel kurallar
+        # 2) Etiket -> Tezgah bilgisi (Usta Defteri + Running)
+        df = self._apply_etiket_location_notes(df)
+
+        # 3) Senin tanımladığın manuel kurallar
         df = self._apply_manual_rules(df)
 
         self.df_dinamik_full = df
