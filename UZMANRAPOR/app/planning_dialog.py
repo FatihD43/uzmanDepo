@@ -1,9 +1,11 @@
 # app/planning_dialog.py
 from __future__ import annotations
+
 import re
 import os, sys, subprocess
 import pandas as pd
 from datetime import datetime
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel,
     QMessageBox, QWidget, QFileDialog, QSpinBox, QTableView, QHeaderView
@@ -21,6 +23,8 @@ except Exception:
 NEVER = {2430, 2432, 2434, 2436, 2438, 2440, 2442, 2444, 2446}
 HAM_ALLOWED = set(range(2447, 2519))   # 2447–2518 arası
 DENIM_ALLOWED_RANGE = (2201, 2446)     # 2201–2446 arası
+
+
 def _extract_selv_teeth(val) -> int | None:
     """Süs kenar metninden diş sayısını (ilk tamsayıyı) çıkarır."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -69,11 +73,33 @@ def _selvedge_compatible_auto(job_sup: str, loom_sup: str, tarak_group: str | No
 
     # Özel durum: 8–10–18 üçlüsü birbiriyle uyumlu
     if t_job in special and t_loom in special:
-        # İstersen ileride tarak_group == 56/4/194 vs. diye daha da sıkılaştırabiliriz.
         return True
 
     # Genel tolerans: en fazla 2 diş fark
     return abs(t_job - t_loom) <= 2
+
+
+def _orgu_prefix(val: str) -> str:
+    s = (val or "").strip()
+    return s[:1].upper() if s else ""
+
+
+def _orgu_compatible(job_orgu: str, loom_orgu: str) -> bool:
+    """
+    Örgü uyumu kontrolü.
+    - Zemin örgü "3" ile başlayıp tezgah örgü "K" ile başlıyorsa → UYUMSUZ
+    - Zemin örgü "K" ile başlayıp tezgah örgü "3" ile başlıyorsa → UYUMSUZ
+    - Diğer tüm durumlar → UYUMLU
+    """
+    job_prefix = _orgu_prefix(job_orgu)
+    loom_prefix = _orgu_prefix(loom_orgu)
+    if not job_prefix or not loom_prefix:
+        return True
+    return not (
+        (job_prefix == "3" and loom_prefix == "K")
+        or (job_prefix == "K" and loom_prefix == "3")
+    )
+
 
 def _loom_in_category(loom_no: int | str, category: str) -> bool:
     try:
@@ -86,6 +112,7 @@ def _loom_in_category(loom_no: int | str, category: str) -> bool:
         return n in HAM_ALLOWED
     return (DENIM_ALLOWED_RANGE[0] <= n <= DENIM_ALLOWED_RANGE[1])
 
+
 def _pick_col(df: pd.DataFrame, names: list[str]) -> str | None:
     for n in names:
         if n in df.columns:
@@ -96,6 +123,7 @@ def _pick_col(df: pd.DataFrame, names: list[str]) -> str | None:
         if n.lower() in low:
             return low[n.lower()]
     return None
+
 
 def _tarak_key_generic(val) -> str:
     """Dinamik ile aynı normalize (a/b/c ...). Virgül ondalığı koru."""
@@ -112,6 +140,7 @@ def _tarak_key_generic(val) -> str:
         out.append(n)
     return "/".join(out)
 
+
 class PlanningDialog(QDialog):
     """
     Arızalı/Bakımda ve 'Boş Gösterilecek' tezgahlar:
@@ -119,6 +148,7 @@ class PlanningDialog(QDialog):
       - Boş ve Açılacak tablolarına GELMEZLER
       - Atama yapılamaz (listeden tamamen hariç)
     """
+
     def __init__(
         self,
         df_jobs,
@@ -184,7 +214,7 @@ class PlanningDialog(QDialog):
         right_l.addWidget(QLabel("Boş Tezgahlar (kategori + tarak uyumlu)"))
         self.tbl_free = QTableView()
         self.model_free = PandasModel(pd.DataFrame(columns=[
-            "Tezgah","Kategori","Tip","Tarak","Örgü","Süs Kenar","KalanMetre","Kesim Şekli"
+            "Tezgah", "Kategori", "Tip", "Tarak", "Örgü", "Süs Kenar", "KalanMetre", "Kesim Şekli"
         ]))
         self.tbl_free.setModel(self.model_free)
         self.tbl_free.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -194,7 +224,7 @@ class PlanningDialog(QDialog):
         right_l.addWidget(self.lbl_soon)
         self.tbl_soon = QTableView()
         self.model_soon = PandasModel(pd.DataFrame(columns=[
-            "Tezgah","Kategori","Tip","Tarak","Örgü","Süs Kenar","KalanMetre","Kesim Şekli"
+            "Tezgah", "Kategori", "Tip", "Tarak", "Örgü", "Süs Kenar", "KalanMetre", "Kesim Şekli"
         ]))
         self.tbl_soon.setModel(self.model_soon)
         self.tbl_soon.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -406,17 +436,17 @@ class PlanningDialog(QDialog):
 
                         run_map = {}
                         for _, rr in df_run.iterrows():
-                            tz = _digits(rr.get(col_tz_run, ""))
+                            tzv = _digits(rr.get(col_tz_run, ""))
                             sk = "" if pd.isna(rr.get("Süs Kenar", "")) else str(rr.get("Süs Kenar", ""))
-                            if tz and sk:
-                                run_map[tz] = sk
+                            if tzv and sk:
+                                run_map[tzv] = sk
 
                         def _fill_selv(row):
                             val = str(row.get("Tezgahın Süs Kenarı", "") or "").strip()
                             if val:
                                 return val
-                            tz = _digits(row.get("Tezgah Numarası", ""))
-                            return run_map.get(tz, "")
+                            tzv = _digits(row.get("Tezgah Numarası", ""))
+                            return run_map.get(tzv, "")
 
                         out["Tezgahın Süs Kenarı"] = out.apply(_fill_selv, axis=1)
             except Exception:
@@ -444,8 +474,7 @@ class PlanningDialog(QDialog):
                 fmt_date = wb.add_format({"valign": "vcenter", "border": 1, "num_format": "dd.mm.yyyy"})
                 fmt_ham_warp = wb.add_format({"valign": "vcenter", "border": 1, "bg_color": "#FFF3B0"})  # sarı
                 fmt_denim_warp = wb.add_format({"valign": "vcenter", "border": 1, "bg_color": "#DDEBFF"})  # mavi
-                fmt_mismatch = wb.add_format(
-                    {"valign": "vcenter", "border": 1, "bg_color": "#D32F2F", "font_color": "white"})
+                fmt_mismatch = wb.add_format({"valign": "vcenter", "border": 1, "bg_color": "#D32F2F", "font_color": "white"})
 
                 for c, name in enumerate(wanted):
                     ws.write(0, c, name, fmt_header)
@@ -542,8 +571,8 @@ class PlanningDialog(QDialog):
             self.lst_groups_denim.addItem(str(g))
         for g in groups_ham:
             self.lst_groups_ham.addItem(str(g))
-    # --------------- AUTO PLANLAMA (tamamen sessiz, mesaj kutusu yok) ---------------
 
+    # --------------- AUTO PLANLAMA (tamamen sessiz, mesaj kutusu yok) ---------------
     def auto_plan_all_groups(self) -> int:
         """
         Tüm DENIM ve HAM tarak gruplarında, boş + açılacak tezgahlara
@@ -593,16 +622,18 @@ class PlanningDialog(QDialog):
         df_free = getattr(self.model_free, "_df", pd.DataFrame())
         df_soon = getattr(self.model_soon, "_df", pd.DataFrame())
 
-        looms = []
+        # Boş varsa önce Boş, yoksa Açılacaklar'a mutlaka baksın.
+        looms: list[dict] = []
         for src in (df_free, df_soon):
             if src is None or src.empty:
                 continue
             for _, row in src.iterrows():
                 loom_no = str(row.get("Tezgah", "")).strip()
-                if not loom_no:
+                if not loom_no or loom_no.lower() in ("nan", "none"):
                     continue
                 loom_sup = str(row.get("Süs Kenar", "") or "").strip()
-                looms.append({"Tezgah": loom_no, "SüsKenar": loom_sup})
+                loom_orgu = str(row.get("Örgü", "") or "").strip()
+                looms.append({"Tezgah": loom_no, "SüsKenar": loom_sup, "Orgu": loom_orgu})
 
         if not looms:
             return 0
@@ -638,8 +669,9 @@ class PlanningDialog(QDialog):
                 if loom_no in used_looms:
                     continue
                 loom_sup = loom["SüsKenar"]
+                loom_orgu = loom.get("Orgu", "")
 
-                ok, msg, remove_row = self._assign_first_job_auto(key, loom_no, loom_sup)
+                ok, msg, remove_row = self._assign_first_job_auto(key, loom_no, loom_sup, loom_orgu)
 
                 if ok:
                     progressed = True
@@ -649,7 +681,7 @@ class PlanningDialog(QDialog):
                     # Bu job artık ya atandı ya Atla oldu; bir sonraki job için dış döngüye dön
                     break
 
-                # ok == False ise (ör: süs kenarı uyumsuz) → sıradaki tezgaha bakmaya devam
+                # ok == False ise (ör: süs kenarı/örgü uyumsuz) → sıradaki tezgaha bakmaya devam
 
             if not progressed:
                 # Mevcut en öncelikli iş, kalan hiçbir tezgaha sığmıyor → bırak, manuel baksın
@@ -703,19 +735,19 @@ class PlanningDialog(QDialog):
     def _build_view_from_running(self, src: pd.DataFrame, category: str) -> pd.DataFrame:
         """RUNNING kaynağından tablo görünümü üretir."""
         if src is None or src.empty:
-            return pd.DataFrame(columns=["Tezgah","Kategori","Tip","Tarak","Örgü","Süs Kenar","KalanMetre","Kesim Şekli"])
+            return pd.DataFrame(columns=["Tezgah", "Kategori", "Tip", "Tarak", "Örgü", "Süs Kenar", "KalanMetre", "Kesim Şekli"])
 
-        col_tz   = _pick_col(src, ["Tezgah No","Tezgah","Tezgah Numarası"])
-        col_tip  = _pick_col(src, ["KökTip","Kök Tip Kodu","Tip No","Tip Kodu","Tip","Mamul Tipi"])
-        col_tg   = _pick_col(src, ["Tarak Grubu","Tarak","TarakGrubu"])
+        col_tz = _pick_col(src, ["Tezgah No", "Tezgah", "Tezgah Numarası"])
+        col_tip = _pick_col(src, ["KökTip", "Kök Tip Kodu", "Tip No", "Tip Kodu", "Tip", "Mamul Tipi"])
+        col_tg = _pick_col(src, ["Tarak Grubu", "Tarak", "TarakGrubu"])
         col_orgu = "Orgu Kodu" if "Orgu Kodu" in src.columns else _pick_col(
             src, ["Zemin Örgü", "Zemin Örgü Kodu", "Zemin Örgü Adı", "Örgü", "Zemin Orgu"]
         )
-        col_sus  = "Süs Kenar" if "Süs Kenar" in src.columns else None
-        col_cut  = _pick_col(src, ["Kesim Tipi","Kesim","ISAVER/ROTOCUT","ISAVER/ROTOCUT/ISAVERKit"])
+        col_sus = "Süs Kenar" if "Süs Kenar" in src.columns else None
+        col_cut = _pick_col(src, ["Kesim Tipi", "Kesim", "ISAVER/ROTOCUT", "ISAVER/ROTOCUT/ISAVERKit"])
 
         if "_KalanMetreNorm" not in src.columns:
-            kal_col = _pick_col(src, ["Kalan","Kalan Mt","Kalan Metre","Kalan_Metre","_KalanMetre"])
+            kal_col = _pick_col(src, ["Kalan", "Kalan Mt", "Kalan Metre", "Kalan_Metre", "_KalanMetre"])
             if kal_col:
                 src = src.copy()
                 src["_KalanMetreNorm"] = pd.to_numeric(src[kal_col], errors="coerce")
@@ -737,17 +769,17 @@ class PlanningDialog(QDialog):
                 "Kesim Şekli": str(r.get(col_cut, "")) if col_cut else "",
             })
         view = pd.DataFrame.from_records(rows, columns=[
-            "Tezgah","Kategori","Tip","Tarak","Örgü","Süs Kenar","KalanMetre","Kesim Şekli"
+            "Tezgah", "Kategori", "Tip", "Tarak", "Örgü", "Süs Kenar", "KalanMetre", "Kesim Şekli"
         ])
         return view
 
     def _load_looms_for_key_and_category(self, key: str, category: str):
         # tablolari temizle
         self.model_free.set_df(pd.DataFrame(columns=[
-            "Tezgah","Kategori","Tip","Tarak","Örgü","Süs Kenar","KalanMetre","Kesim Şekli"
+            "Tezgah", "Kategori", "Tip", "Tarak", "Örgü", "Süs Kenar", "KalanMetre", "Kesim Şekli"
         ]))
         self.model_soon.set_df(pd.DataFrame(columns=[
-            "Tezgah","Kategori","Tip","Tarak","Örgü","Süs Kenar","KalanMetre","Kesim Şekli"
+            "Tezgah", "Kategori", "Tip", "Tarak", "Örgü", "Süs Kenar", "KalanMetre", "Kesim Şekli"
         ]))
 
         df = self.df_looms.copy()
@@ -756,7 +788,7 @@ class PlanningDialog(QDialog):
 
         # _TarakKey yoksa üret
         if "_TarakKey" not in df.columns:
-            tg_col = _pick_col(df, ["Tarak Grubu","Tarak","TarakGrubu"])
+            tg_col = _pick_col(df, ["Tarak Grubu", "Tarak", "TarakGrubu"])
             df["_TarakKey"] = df[tg_col].astype(str).apply(_tarak_key_generic) if tg_col else ""
 
         # tarak uyumu
@@ -774,11 +806,11 @@ class PlanningDialog(QDialog):
                 return False
             df["_OpenTezgahFlag"] = df.apply(_detect_94_row, axis=1)
         if "_KalanMetreNorm" not in df.columns:
-            kal_col = _pick_col(df, ["Kalan","Kalan Mt","Kalan Metre","Kalan_Metre","_KalanMetre"])
+            kal_col = _pick_col(df, ["Kalan", "Kalan Mt", "Kalan Metre", "Kalan_Metre", "_KalanMetre"])
             df["_KalanMetreNorm"] = pd.to_numeric(df[kal_col], errors="coerce") if kal_col else pd.NA
 
         # Kategori filtresi + atanmış olanları çıkar
-        col_tz = _pick_col(df, ["Tezgah No","Tezgah","Tezgah Numarası"])
+        col_tz = _pick_col(df, ["Tezgah No", "Tezgah", "Tezgah Numarası"])
         assigned_looms = set(
             self.df_jobs.get("Tezgah Numarası", "").astype(str).str.strip().replace({"nan": "", "None": ""})
         )
@@ -786,19 +818,19 @@ class PlanningDialog(QDialog):
 
         # --- Kısıtlı (arızalı/boş) tezgahları hariç tut ---
         blocked = set(self._blocked_looms or set())
-        dummy   = set(self._dummy_looms or set())
+        dummy = set(self._dummy_looms or set())
 
         def _allowed_row(x):
             tz_raw = x[col_tz] if col_tz else ""
             m = re.search(r"(\d+)", str(tz_raw))
-            tz = m.group(1) if m else ""
-            tz_int = int(tz) if tz.isdigit() else None
+            tzv = m.group(1) if m else ""
+            tz_int = int(tzv) if tzv.isdigit() else None
             return (
                 (tz_int is not None)
                 and _loom_in_category(tz_int, str(category).upper())
-                and (tz not in blocked)
-                and (tz not in dummy)
-                and (tz not in assigned_looms)
+                and (tzv not in blocked)
+                and (tzv not in dummy)
+                and (tzv not in assigned_looms)
             )
 
         df = df[df.apply(_allowed_row, axis=1)]
@@ -818,6 +850,7 @@ class PlanningDialog(QDialog):
         def _safe_loom_int(s):
             m = re.search(r"(\d+)", str(s))
             return int(m.group(1)) if m else 99999
+
         if not view_free.empty:
             view_free = view_free.sort_values(by="Tezgah", key=lambda s: s.apply(_safe_loom_int), ascending=True)
         if not view_soon.empty:
@@ -829,7 +862,13 @@ class PlanningDialog(QDialog):
         self.model_soon.set_df(view_soon)
         self.tbl_soon.resizeColumnsToContents()
 
-    def _assign_first_job(self, key: str, loom_no: str, loom_sup: str | None = None):
+    def _assign_first_job(
+        self,
+        key: str,
+        loom_no: str,
+        loom_sup: str | None = None,
+        loom_orgu: str | None = None,
+    ):
         df = self.df_jobs
         mask_group = df.get("_TarakKey", "").astype(str) == str(key)
         mask_digits = df.get("_LeventHasDigits", False)
@@ -856,7 +895,8 @@ class PlanningDialog(QDialog):
         note_col = "NOTLAR" if "NOTLAR" in df.columns else None
         job_note = str(df.at[idx, note_col]).strip() if note_col else ""
         has_atki_issue = bool(re.search(r"ATKI\s*1\s*EKSİK|ATKI\s*2\s*EKSİK", job_note, flags=re.IGNORECASE))
-        if job_note:
+
+        if job_note and job_note.lower() not in ("", "nan", "none"):
             if has_atki_issue:
                 m = QMessageBox.question(
                     self, "Uyarı",
@@ -873,6 +913,32 @@ class PlanningDialog(QDialog):
                 self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
                 return True, f"Not nedeniyle 'Atla' olarak işaretlendi (satır {idx}).", False
 
+        # --- Örgü uyumu (MANUAL) ---  (Süs Kenar gibi davranır)
+        job_orgu = ""
+        for orgu_col in ["Zemin Örgü", "Zemin Orgu", "Örgü", "Orgu"]:
+            if orgu_col in df.columns:
+                job_orgu = str(df.at[idx, orgu_col]).strip()
+                break
+
+        current_orgu = (loom_orgu or "").strip()
+        if job_orgu and current_orgu and (not _orgu_compatible(job_orgu, current_orgu)):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("Örgü Uyarısı")
+            box.setText(
+                f"Verilen işin örgüsü ({job_orgu}) seçilen tezgahın örgüsünden ({current_orgu}) uyumsuz."
+            )
+            btn_yes = box.addButton("Evet (Atamaya devam)", QMessageBox.YesRole)
+            btn_no = box.addButton("Hayır (Atla)", QMessageBox.NoRole)
+            btn_other = box.addButton("Başka tezgah seç", QMessageBox.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_no:
+                self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
+                return True, f"Örgü uyumsuzluğu nedeniyle 'Atla' olarak işaretlendi (satır {idx}).", False
+            if clicked is btn_other:
+                return False, "Başka tezgah seçin.", False
+
         # --- Süs kenar uyumu ---
         job_sup = ""
         if "SÜS KENAR" in df.columns:
@@ -880,13 +946,14 @@ class PlanningDialog(QDialog):
         elif "Süs Kenar" in df.columns:
             job_sup = str(df.at[idx, "Süs Kenar"]).strip()
         current_sup = (loom_sup or "").strip()
+
         if job_sup and current_sup and job_sup != current_sup:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
             box.setWindowTitle("Süs Kenarı Uyarısı")
             box.setText(f"Verilen işin süs kenarı ({job_sup}) seçilen tezgahın süs kenarından ({current_sup}) farklı.")
-            btn_yes   = box.addButton("Evet (Atamaya devam)", QMessageBox.YesRole)
-            btn_no    = box.addButton("Hayır (Atla)", QMessageBox.NoRole)
+            btn_yes = box.addButton("Evet (Atamaya devam)", QMessageBox.YesRole)
+            btn_no = box.addButton("Hayır (Atla)", QMessageBox.NoRole)
             btn_other = box.addButton("Başka tezgah seç", QMessageBox.RejectRole)
             box.exec()
             clicked = box.clickedButton()
@@ -899,13 +966,20 @@ class PlanningDialog(QDialog):
         # Atama
         self.df_jobs.at[idx, "Tezgah Numarası"] = loom_no
         return True, f"{loom_no} tezgâha atandı (satır {idx}).", True
-    def _assign_first_job_auto(self, key: str, loom_no: str, loom_sup: str | None = None):
+
+    def _assign_first_job_auto(
+        self,
+        key: str,
+        loom_no: str,
+        loom_sup: str | None = None,
+        loom_orgu: str | None = None,
+    ):
         """
         AUTO mod: Mesaj kutusu kullanmadan, kural bazlı atama yapar.
 
         Dönüş:
           ok:          Bu çağrıda bir ilerleme oldu mu? (Atama YAPILDI veya iş 'Atla' oldu) → True
-                       Hiçbir şey değişmediyse (süs kenarı uyumsuz, iş seçilemedi vb.) → False
+                       Hiçbir şey değişmediyse (süs kenarı/örgü uyumsuz, iş seçilemedi vb.) → False
           msg:         Log / bilgi mesajı
           remove_row:  Bu tezgah satırı tek iş aldı, bir daha kullanılmasın mı? (True/False)
         """
@@ -937,6 +1011,7 @@ class PlanningDialog(QDialog):
         note_col = "NOTLAR" if "NOTLAR" in df.columns else None
         job_note = str(df.at[idx, note_col]).strip() if note_col else ""
         has_atki_issue = bool(re.search(r"ATKI\s*1\s*EKSİK|ATKI\s*2\s*EKSİK", job_note, flags=re.IGNORECASE))
+
         # HERHANGİ BİR NOT VARSA → ATLA
         if job_note and job_note.lower() not in ("", "nan", "none"):
             self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
@@ -947,7 +1022,19 @@ class PlanningDialog(QDialog):
             self.df_jobs.at[idx, "Tezgah Numarası"] = "Atla"
             return True, f"ATKI eksikliği nedeniyle 'Atla' olarak işaretlendi (AUTO, satır {idx}).", False
 
-        # Diğer notlar için AUTO modda şimdilik ekstra bir şey yapmıyoruz; ileride ek kural koyabiliriz.
+        # --- Örgü uyumu (AUTO) ---
+        job_orgu = ""
+        for orgu_col in ["Zemin Örgü", "Zemin Orgu", "Örgü", "Orgu"]:
+            if orgu_col in df.columns:
+                job_orgu = str(df.at[idx, orgu_col]).strip()
+                break
+
+        current_orgu = (loom_orgu or "").strip()
+        if job_orgu and current_orgu and (not _orgu_compatible(job_orgu, current_orgu)):
+            # Süs kenarı uyumsuzluğu gibi: bu tezgahı pas geç
+            return False, (
+                f"Örgü uyumsuz (iş: {job_orgu}, tezgah: {current_orgu}) (AUTO, satır {idx})."
+            ), False
 
         # --- Süs kenar uyumu (AUTO) ---
         job_sup = ""
@@ -972,7 +1059,6 @@ class PlanningDialog(QDialog):
         # --- Atama ---
         self.df_jobs.at[idx, "Tezgah Numarası"] = loom_no
         return True, f"{loom_no} tezgaha atandı (AUTO, satır {idx}).", True
-
 
     def _assign_from_table(self, source: str, idx: QModelIndex):
         if not idx.isValid():
@@ -1002,7 +1088,8 @@ class PlanningDialog(QDialog):
                 loom_sup = str(row.get(sup_col, "")).strip()
                 break
 
-        ok, msg, remove_row = self._assign_first_job(key, loom_no, loom_sup)
+        loom_orgu = str(row.get("Örgü", "")).strip()
+        ok, msg, remove_row = self._assign_first_job(key, loom_no, loom_sup, loom_orgu)
 
         if ok:
             if remove_row:

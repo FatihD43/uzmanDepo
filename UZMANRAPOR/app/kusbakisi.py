@@ -270,7 +270,7 @@ class LoomCell(QLabel):
         """)
 
         # Biraz dikey alan
-        self.setMinimumSize(QSize(96, 96))
+        self.setMinimumSize(QSize(96, 56))
 
 
 # -------------------------------------------------------------

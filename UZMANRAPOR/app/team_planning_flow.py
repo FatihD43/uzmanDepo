@@ -8,7 +8,7 @@ from collections import defaultdict
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QTableView,
     QPushButton, QHeaderView, QSplitter, QDialog, QListWidgetItem, QTabWidget, QSpinBox,
-    QMessageBox
+    QMessageBox, QInputDialog
 )
 from PySide6.QtCore import Qt, QModelIndex, QSettings
 from app.models import PandasModel
@@ -507,6 +507,15 @@ class TezgahPicker(QDialog):
             cand = pd.concat(parts, ignore_index=True)
         else:
             cand = pd.DataFrame(columns=[col_tz, "_TG_norm", "_OpenTezgahFlag", "_KalanMetreNorm", "_bucket"])
+        if not cand.empty:
+            mask_viable = (
+                    (cand["_OpenTezgahFlag"] == True)
+                    | (
+                            pd.notna(cand["_KalanMetreNorm"])
+                            & (cand["_KalanMetreNorm"] <= self._thr)
+                    )
+            )
+            cand = cand[mask_viable].copy()
 
         if not cand.empty:
             # Kullanıcı, hedef tarak grubunun kendi tezgahlarının listelenmesini istemiyor.
@@ -662,6 +671,9 @@ class TeamPlanningFlowTab(QWidget):
         row_hdr = QHBoxLayout()
         row_hdr.addWidget(QLabel("TAKIM ATAMALARI"))
         row_hdr.addStretch(1)
+        self.btn_reset_team = QPushButton("Seçimleri Sıfırla")
+        self.btn_reset_team.clicked.connect(self._reset_team_assignments)
+        row_hdr.addWidget(self.btn_reset_team)
         self.btn_export_team = QPushButton("TAKIM LİSTESİNİ DIŞA AKTAR (Excel)")
         self.btn_export_team.clicked.connect(self._export_team_assignments)
         row_hdr.addWidget(self.btn_export_team)
@@ -1027,6 +1039,16 @@ class TeamPlanningFlowTab(QWidget):
         except Exception:
             return ""
 
+    def _prompt_new_cut_type(self, loom_no: str) -> str:
+        current_cut = self._lookup_cut_type(loom_no)
+        msg = "Yeni Kesim Tipi seçin."
+        if current_cut:
+            msg = f"Yeni Kesim Tipi seçin.\n(Mevcut tezgah kesim tipi: {current_cut})"
+            options = ["ISAVER", "ROTOCUT", "ISAVERKit"]
+            selection, ok = QInputDialog.getItem(self, "Yeni Kesim Tipi", msg, options, 0, False)
+        if not ok:
+            return ""
+        return str(selection).strip()
     # ---------------- Çift tık ile atama ----------------
     def _assign_on_doubleclick(self, idx: QModelIndex):
         if not self._can_write:
@@ -1090,8 +1112,8 @@ class TeamPlanningFlowTab(QWidget):
 
                     filtered = {k: v for k, v in row_dict.items()
                                 if k not in ["Açık Tezgah (adet)", "Açacak Tezgah (adet)"]}
-                    # alt panel için Kesim Tipi eklendi
-                    filtered["Kesim Tipi"] = self._lookup_cut_type(tz)
+                    # alt panel için Yeni Kesim Tipi adını kullanıcıdan al
+                    filtered["Kesim Tipi"] = self._prompt_new_cut_type(tz)
 
                     self.team_rows.append(filtered)
                     self.model_team.set_df(pd.DataFrame.from_records(self.team_rows))
@@ -1342,6 +1364,14 @@ class TeamPlanningFlowTab(QWidget):
             return ak
         return str(row.get("LeventNo / Durum", "")).strip() or "ROW"
 
+    def _reset_team_assignments(self):
+        self.team_rows = []
+        self.model_team.set_df(pd.DataFrame())
+        self._assignments = {}
+        self._used_looms = {}
+        self._used_looms_global = set()
+        self._ordered_looms_cache = {}
+        self._bind_group_jobs()
     # ---------------- Excel'e dışa aktarım (yazıcıya hazır) ----------------
     def _export_team_assignments(self):
         try:
