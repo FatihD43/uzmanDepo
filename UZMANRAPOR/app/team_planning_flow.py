@@ -1049,6 +1049,80 @@ class TeamPlanningFlowTab(QWidget):
         if not ok:
             return ""
         return str(selection).strip()
+
+    def _prompt_missing_dugum_choice(self) -> str | None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Uyarı")
+        box.setText(
+            "Bu iş düğüm verilmemiş. Süs Kenar ve ya Örgü Uyumsuz olabilir. Kontrol Et."
+        )
+        btn_dugum = box.addButton("Düğüm", QMessageBox.AcceptRole)
+        btn_takim = box.addButton("Takım", QMessageBox.ActionRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_dugum:
+            return "dugum"
+        if clicked == btn_takim:
+            return "takim"
+        return None
+
+    def _refresh_jobs_table(self, df: pd.DataFrame) -> None:
+        self.model_jobs.set_df(df)
+        self.tbl_jobs.resizeColumnsToContents()
+        self._shrink_columns_by_header(self.tbl_jobs)
+
+    def _assign_dugum_to_row(self, df: pd.DataFrame, row: int, target_tg_norm: str, grp_type: str) -> bool:
+        next_loom = self._next_free_loom(target_tg_norm, grp_type or "denim")
+        if not next_loom:
+            return False
+        df.at[row, "Tezgah"] = f"{next_loom}  (DÜĞÜM)"
+        self._refresh_jobs_table(df)
+        row_dict = df.iloc[row].to_dict()
+        job_key = self._make_job_key(row_dict)
+        self._assignments[(target_tg_norm, job_key)] = f"{next_loom}  (DÜĞÜM)"
+        self._used_looms_global.add(str(next_loom))
+        return True
+
+    def _assign_team_to_row(self, df: pd.DataFrame, row: int, target_tg_norm: str, grp_type: str) -> None:
+        exclude = set(self._used_looms_global)
+        for v in self._assignments.values():
+            m = re.search(r"\d+", str(v))
+            if m:
+                exclude.add(m.group())
+        exclude.update(self._blocked_looms)
+        exclude.update(self._dummy_looms)
+
+        dlg = TezgahPicker(
+            self.df_run,
+            target_tg_norm,
+            grp_type or "denim",
+            soon_threshold_m=self.flow_threshold_m,
+            parent=self,
+            df_jobs_full=self.df_jobs,
+            exclude_looms=exclude
+        )
+        if not dlg.exec():
+            return
+        tz = dlg.selected_tezgah()
+        if not tz:
+            return
+        df.at[row, "Tezgah"] = str(tz)
+        self._refresh_jobs_table(df)
+
+        row_dict = df.iloc[row].to_dict()
+        job_key = self._make_job_key(row_dict)
+        self._assignments[(target_tg_norm, job_key)] = str(tz)
+        self._used_looms_global.add(str(tz))
+
+        filtered = {k: v for k, v in row_dict.items()
+                    if k not in ["Açık Tezgah (adet)", "Açacak Tezgah (adet)"]}
+        filtered["Kesim Tipi"] = self._prompt_new_cut_type(tz)
+
+        self.team_rows.append(filtered)
+        self.model_team.set_df(pd.DataFrame.from_records(self.team_rows))
+        self.tbl_team.resizeColumnsToContents()
+        self._shrink_columns_by_header(self.tbl_team)
     # ---------------- Çift tık ile atama ----------------
     def _assign_on_doubleclick(self, idx: QModelIndex):
         if not self._can_write:
@@ -1069,55 +1143,43 @@ class TeamPlanningFlowTab(QWidget):
                 grp_type = self._current_category_from_list()
             except Exception:
                 grp_type = _group_type_from_dinamik(self.df_jobs, _col(self.df_jobs, ["Tarak Grubu","Tarak","TarakGrubu"]), target_tg_job)
+            tezgah_col = df.columns.get_loc("Tezgah") if "Tezgah" in df.columns else None
+            open_cnt = df.at[row, "Açık Tezgah (adet)"] if "Açık Tezgah (adet)" in df.columns else 0
+            try:
+                open_cnt_val = int(float(str(open_cnt).replace(",", ".")))
+            except Exception:
+                open_cnt_val = 0
+            tezgah_value = str(df.at[row, "Tezgah"]) if "Tezgah" in df.columns else ""
+            has_any_dugum = False
+            if "Tezgah" in df.columns:
+                try:
+                    group_mask = df["Tarak Grubu"].astype(str) == str(target_tg_job)
+                    group_values = df.loc[group_mask, "Tezgah"].astype(str)
+                    has_any_dugum = group_values.str.contains("DÜĞÜM", case=False, na=False).any()
+                except Exception:
+                    has_any_dugum = False
+            needs_prompt = (
+                    tezgah_col is not None
+                    and idx.column() == tezgah_col
+                    and open_cnt_val != 0
+                    and "DÜĞÜM" not in tezgah_value.upper()
+                    and not has_any_dugum
+            )
+            if needs_prompt:
+                choice = self._prompt_missing_dugum_choice()
+                if choice == "dugum":
+                    if not self._assign_dugum_to_row(df, row, target_tg_norm, grp_type or "denim"):
+                        QMessageBox.information(self, "Bilgi", "Uygun düğüm tezgahı bulunamadı.")
+                elif choice == "takim":
+                    self._assign_team_to_row(df, row, target_tg_norm, grp_type or "denim")
+                return
 
             # 1) DÜĞÜM
-            next_loom = self._next_free_loom(target_tg_norm, grp_type or "denim")
-            if next_loom:
-                df.at[row, "Tezgah"] = f"{next_loom}  (DÜĞÜM)"
-                self.model_jobs.set_df(df); self.tbl_jobs.resizeColumnsToContents(); self._shrink_columns_by_header(self.tbl_jobs)
-                row_dict = df.iloc[row].to_dict()
-                job_key  = self._make_job_key(row_dict)
-                self._assignments[(target_tg_norm, job_key)] = f"{next_loom}  (DÜĞÜM)"
-                self._used_looms_global.add(str(next_loom))
+            if self._assign_dugum_to_row(df, row, target_tg_norm, grp_type or "denim"):
                 return
 
             # 2) TAKIM (Picker)
-            exclude = set(self._used_looms_global)
-            for v in self._assignments.values():
-                m = re.search(r"\d+", str(v))
-                if m: exclude.add(m.group())
-            # storage'tan gelen sabit kısıtları da ekle
-            exclude.update(self._blocked_looms)
-            exclude.update(self._dummy_looms)
-
-            dlg = TezgahPicker(
-                self.df_run,
-                target_tg_norm,
-                grp_type or "denim",
-                soon_threshold_m=self.flow_threshold_m,
-                parent=self,
-                df_jobs_full=self.df_jobs,
-                exclude_looms=exclude
-            )
-            if dlg.exec():
-                tz = dlg.selected_tezgah()
-                if tz:
-                    df.at[row, "Tezgah"] = str(tz)
-                    self.model_jobs.set_df(df); self.tbl_jobs.resizeColumnsToContents(); self._shrink_columns_by_header(self.tbl_jobs)
-
-                    row_dict = df.iloc[row].to_dict()
-                    job_key  = self._make_job_key(row_dict)
-                    self._assignments[(target_tg_norm, job_key)] = str(tz)
-                    self._used_looms_global.add(str(tz))
-
-                    filtered = {k: v for k, v in row_dict.items()
-                                if k not in ["Açık Tezgah (adet)", "Açacak Tezgah (adet)"]}
-                    # alt panel için Yeni Kesim Tipi adını kullanıcıdan al
-                    filtered["Kesim Tipi"] = self._prompt_new_cut_type(tz)
-
-                    self.team_rows.append(filtered)
-                    self.model_team.set_df(pd.DataFrame.from_records(self.team_rows))
-                    self.tbl_team.resizeColumnsToContents(); self._shrink_columns_by_header(self.tbl_team)
+            self._assign_team_to_row(df, row, target_tg_norm, grp_type or "denim")
         finally:
             self._picker_open = False
 

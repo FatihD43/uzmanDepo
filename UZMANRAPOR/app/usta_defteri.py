@@ -8,12 +8,8 @@ from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QDateEdit, QTableWidget, QTableWidgetItem, QFileDialog, QMessageBox, QGroupBox,
-    QInputDialog
+    QInputDialog, QDialog, QListWidget, QListWidgetItem
 )
-
-# ------------------------------------------------------------
-#  SQL Server bağlantı ayarları
-# ------------------------------------------------------------
 
 SQL_CONN_STR = (
     "Driver={SQL Server};"
@@ -23,21 +19,13 @@ SQL_CONN_STR = (
     "PWD=03114080Ww.;"
 )
 
-USTA_LIST = [
-    "AHMET YILMAZ", "MEHMET ŞANLI", "MURAT PEHLİVAN", "KERİM KABA", "ERDAL GÖKSAL",
-    "ZAFER ATEŞ", "FATİH ERCAN", "NURİ AY", "ADEM ENSAR", "HÜSEYİN YAŞLI",
-    "MUSTAFA YILDIZ", "YUSUF DEMİR", "OSMAN KAYA", "ALİ KOÇ", "SALİH KURT"
-]
-
-IS_TANIM_LIST = ["DÜĞÜM", "TAKIM"]
+IS_TANIM_LIST = ["DÜĞÜM", "TAKIM", "BAKIM", "DİĞER"]
 
 
 def _vardiya_str(now_qtime) -> str:
-    # Metin: "(07:00)|14:23" gibi
     h = now_qtime.hour()
     m = now_qtime.minute()
     t = h + m / 60.0
-    # vardiyalar: 07-15, 15-23, 23-07
     if 7 <= t < 15:
         vs = "(07:00)"
     elif 15 <= t < 23:
@@ -48,10 +36,6 @@ def _vardiya_str(now_qtime) -> str:
 
 
 def _ensure_db():
-    """
-    SQL Server tarafında UstaDefteri tablosu kurulum script'i ile oluşturuluyor.
-    Burada ekstra bir iş yapmıyoruz. Fonksiyon sadece geriye dönük uyumluluk için duruyor.
-    """
     return
 
 
@@ -68,7 +52,7 @@ def _df_to_table(table: QTableWidget, df: pd.DataFrame):
             v = df.iloc[r, c]
             s = "" if pd.isna(v) else str(v)
             it = QTableWidgetItem(s)
-            if c in [0, 1, 2]:  # Id / Tarih / Saat sola, diğerleri ortalı
+            if c in [0, 1, 2]:
                 it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             else:
                 it.setTextAlignment(Qt.AlignCenter)
@@ -80,7 +64,6 @@ def _df_to_table(table: QTableWidget, df: pd.DataFrame):
 
 
 def _strip_trailing_dot_zero(val) -> str:
-    """1234.0 → '1234', '567.00' → '567'; boş/NaN → ''"""
     if val is None:
         return ""
     try:
@@ -94,22 +77,7 @@ def _strip_trailing_dot_zero(val) -> str:
     return s
 
 
-# ------------------------------------------------------------
-#  Widget
-# ------------------------------------------------------------
-
 class UstaDefteriWidget(QWidget):
-    """
-    - Form girişi (sol)
-    - Rapor alma seçenekleri (sağ)
-    - Alt grid: kayıtlar
-    - Kalıcılık: SQL Server (UzmanRaporDB.dbo.UstaDefteri)
-
-    Dıştan beklenenler:
-      - set_sources(df_dinamik): Levent Bul için dinamik rapor
-      - set_machine_list(list[str]): Tezgah dropdown evreni
-    """
-
     def __init__(self, parent=None):
         super().__init__(parent)
         _ensure_db()
@@ -124,7 +92,6 @@ class UstaDefteriWidget(QWidget):
         top.addWidget(self._build_report_box(), 5)
         root.addLayout(top)
 
-        # Alt grid
         self.tbl = QTableWidget(0, 0)
         self.tbl.setSelectionBehavior(QTableWidget.SelectRows)
         self.tbl.setSelectionMode(QTableWidget.SingleSelection)
@@ -134,37 +101,238 @@ class UstaDefteriWidget(QWidget):
                 color: white;
             }
         """)
-
         root.addWidget(self.tbl, 1)
+
         self._configure_table_look()
         self._apply_beauty_theme()
 
-        # İlk yükleme
         QTimer.singleShot(0, self._load_last_n)
-
-        # Formu ilk açılışta (tarih & vardiya hariç) boşalt
         self._clear_form()
 
-    # -------------------- DB bağlantısı ------------------------------------
+        # combo'ları SQL listelerinden doldur
+        QTimer.singleShot(0, self._refresh_usta_combo)
+        QTimer.singleShot(0, self._refresh_hasil_combo)
 
+    # -------------------- DB bağlantısı ------------------------------------
     def _conn(self):
         return pyodbc.connect(SQL_CONN_STR)
 
     # -------------------- PUBLIC API ---------------------------------
-
     def set_sources(self, df_dinamik: Optional[pd.DataFrame]):
         self.df_jobs = df_dinamik.copy() if df_dinamik is not None else None
 
     def set_machine_list(self, looms: List[str]):
-        # İstek gereği 2201–2518 aralığını eksiksiz sun
         full = [str(x) for x in range(2201, 2519)]
         self.machine_list = full
         self.cmb_tezgah.clear()
-        self.cmb_tezgah.addItem("")  # boş
+        self.cmb_tezgah.addItem("")
         self.cmb_tezgah.addItems(self.machine_list)
 
-    # -------------------- UI Pieces ----------------------------------
+    # -------------------- LOOKUP LISTS (SQL) --------------------------
+    def _fetch_lookup_rows(self, list_name: str) -> List[Dict[str, object]]:
+        sql = """
+        SELECT Id, Value
+        FROM dbo.AppLookupValues
+        WHERE ListName = ? AND IsActive = 1
+        ORDER BY SortOrder, Value;
+        """
+        with self._conn() as c:
+            cur = c.cursor()
+            cur.execute(sql, (list_name,))
+            rows = cur.fetchall()
+        out: List[Dict[str, object]] = []
+        for r in rows:
+            out.append({"id": int(r[0]), "value": str(r[1])})
+        return out
 
+    def _ensure_lookup_value(self, list_name: str, value: str, created_by: str = "AUTO") -> None:
+        """Yoksa ekler; varsa dokunmaz. (Unique index var.)"""
+        value = (value or "").strip()
+        if not value:
+            return
+        sql = """
+        IF NOT EXISTS (SELECT 1 FROM dbo.AppLookupValues WHERE ListName = ? AND Value = ?)
+        BEGIN
+            INSERT INTO dbo.AppLookupValues (ListName, Value, IsActive, SortOrder, CreatedBy)
+            VALUES (?, ?, 1, 0, ?)
+        END
+        """
+        with self._conn() as c:
+            cur = c.cursor()
+            cur.execute(sql, (list_name, value, list_name, value, created_by))
+            c.commit()
+
+    def _update_lookup_value(self, row_id: int, new_value: str, updated_by: str = "UI") -> None:
+        new_value = (new_value or "").strip()
+        if not new_value:
+            return
+        sql = """
+        UPDATE dbo.AppLookupValues
+        SET Value = ?, UpdatedAt = SYSDATETIME(), UpdatedBy = ?
+        WHERE Id = ?;
+        """
+        with self._conn() as c:
+            cur = c.cursor()
+            cur.execute(sql, (new_value, updated_by, row_id))
+            c.commit()
+
+    def _deactivate_lookup_value(self, row_id: int, updated_by: str = "UI") -> None:
+        sql = """
+        UPDATE dbo.AppLookupValues
+        SET IsActive = 0, UpdatedAt = SYSDATETIME(), UpdatedBy = ?
+        WHERE Id = ?;
+        """
+        with self._conn() as c:
+            cur = c.cursor()
+            cur.execute(sql, (updated_by, row_id))
+            c.commit()
+
+    def _refresh_usta_combo(self) -> None:
+        if not hasattr(self, "cmb_usta"):
+            return
+        current = self.cmb_usta.currentText().strip()
+        self.cmb_usta.blockSignals(True)
+        self.cmb_usta.clear()
+        self.cmb_usta.addItem("")
+        for row in self._fetch_lookup_rows("USTA"):
+            self.cmb_usta.addItem(row["value"])
+        if current:
+            self.cmb_usta.setCurrentText(current)
+        self.cmb_usta.blockSignals(False)
+
+    def _refresh_hasil_combo(self) -> None:
+        if not hasattr(self, "cmb_hasilno"):
+            return
+        current = self.cmb_hasilno.currentText().strip()
+        self.cmb_hasilno.blockSignals(True)
+        self.cmb_hasilno.clear()
+        self.cmb_hasilno.setEditable(True)
+        self.cmb_hasilno.insertItem(0, "")
+        for row in self._fetch_lookup_rows("HASIL"):
+            self.cmb_hasilno.addItem(row["value"])
+        if current:
+            self.cmb_hasilno.setCurrentText(current)
+        self.cmb_hasilno.blockSignals(False)
+
+    def _open_manage_dialog(self):
+        pw, ok = QInputDialog.getText(self, "Yetki", "Şifre girin:", QLineEdit.Password)
+        if not ok:
+            return
+        if pw != "itema2024":
+            QMessageBox.warning(self, "Uyarı", "Şifre hatalı.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Usta / Haşıl Yönetimi (SQL)")
+        dlg.resize(520, 520)
+        layout = QVBoxLayout(dlg)
+
+        lst_usta = QListWidget()
+        lst_hasil = QListWidget()
+
+        def fill_list(target: QListWidget, listname: str):
+            target.clear()
+            for row in self._fetch_lookup_rows(listname):
+                it = QListWidgetItem(row["value"])
+                it.setData(Qt.UserRole, row["id"])  # Id sakla
+                target.addItem(it)
+
+        fill_list(lst_usta, "USTA")
+        fill_list(lst_hasil, "HASIL")
+
+        def add_item(target: QListWidget, listname: str, title: str):
+            text, ok2 = QInputDialog.getText(dlg, title, "Yeni değer:")
+            if not (ok2 and text.strip()):
+                return
+            val = text.strip()
+            try:
+                self._ensure_lookup_value(listname, val, created_by="UI")
+            except Exception as e:
+                QMessageBox.warning(dlg, "Uyarı", f"Ekleme başarısız:\n{e}")
+                return
+            fill_list(target, listname)
+
+        def edit_item(target: QListWidget, listname: str, title: str):
+            item = target.currentItem()
+            if not item:
+                return
+            row_id = item.data(Qt.UserRole)
+            old = item.text()
+            text, ok2 = QInputDialog.getText(dlg, title, "Düzenle:", text=old)
+            if not (ok2 and text.strip()):
+                return
+            new_val = text.strip()
+            try:
+                self._update_lookup_value(int(row_id), new_val, updated_by="UI")
+            except Exception as e:
+                QMessageBox.warning(dlg, "Uyarı", f"Güncelleme başarısız:\n{e}")
+                return
+            fill_list(target, listname)
+
+        def deactivate_item(target: QListWidget, listname: str):
+            item = target.currentItem()
+            if not item:
+                return
+            row_id = item.data(Qt.UserRole)
+            res = QMessageBox.question(dlg, "Onay", f"'{item.text()}' pasife alınsın mı?")
+            if res != QMessageBox.Yes:
+                return
+            try:
+                self._deactivate_lookup_value(int(row_id), updated_by="UI")
+            except Exception as e:
+                QMessageBox.warning(dlg, "Uyarı", f"İşlem başarısız:\n{e}")
+                return
+            fill_list(target, listname)
+
+        usta_box = QGroupBox("İşlem Yapan (Usta)")
+        usta_layout = QVBoxLayout(usta_box)
+        usta_layout.addWidget(lst_usta)
+        u_btns = QHBoxLayout()
+        btn_u_add = QPushButton("Ekle")
+        btn_u_edit = QPushButton("Düzenle")
+        btn_u_del = QPushButton("Pasife Al")
+        u_btns.addWidget(btn_u_add)
+        u_btns.addWidget(btn_u_edit)
+        u_btns.addWidget(btn_u_del)
+        usta_layout.addLayout(u_btns)
+
+        hasil_box = QGroupBox("Haşıl No")
+        hasil_layout = QVBoxLayout(hasil_box)
+        hasil_layout.addWidget(lst_hasil)
+        h_btns = QHBoxLayout()
+        btn_h_add = QPushButton("Ekle")
+        btn_h_edit = QPushButton("Düzenle")
+        btn_h_del = QPushButton("Pasife Al")
+        h_btns.addWidget(btn_h_add)
+        h_btns.addWidget(btn_h_edit)
+        h_btns.addWidget(btn_h_del)
+        hasil_layout.addLayout(h_btns)
+
+        layout.addWidget(usta_box)
+        layout.addWidget(hasil_box)
+
+        footer = QHBoxLayout()
+        btn_ok = QPushButton("Kapat")
+        footer.addStretch(1)
+        footer.addWidget(btn_ok)
+        layout.addLayout(footer)
+
+        btn_u_add.clicked.connect(lambda: add_item(lst_usta, "USTA", "Usta Ekle"))
+        btn_u_edit.clicked.connect(lambda: edit_item(lst_usta, "USTA", "Usta Düzenle"))
+        btn_u_del.clicked.connect(lambda: deactivate_item(lst_usta, "USTA"))
+
+        btn_h_add.clicked.connect(lambda: add_item(lst_hasil, "HASIL", "Haşıl Ekle"))
+        btn_h_edit.clicked.connect(lambda: edit_item(lst_hasil, "HASIL", "Haşıl Düzenle"))
+        btn_h_del.clicked.connect(lambda: deactivate_item(lst_hasil, "HASIL"))
+
+        btn_ok.clicked.connect(dlg.accept)
+
+        dlg.exec()
+        # kapatırken form combo'larını güncelle
+        self._refresh_usta_combo()
+        self._refresh_hasil_combo()
+
+    # -------------------- UI ----------------------------------
     def _build_form_box(self) -> QGroupBox:
         box = QGroupBox("DÜĞÜM TAKIM GİRİŞ")
         grid = QGridLayout(box)
@@ -203,7 +371,6 @@ class UstaDefteriWidget(QWidget):
         self.ed_etiket = QLineEdit()
         grid.addWidget(self.ed_etiket, r + 6, 1)
 
-        # Sağ kolon
         c = 2
         grid.addWidget(QLabel("DOKUMA İŞ EMRİ"), r, c)
         self.ed_dokuma = QLineEdit()
@@ -216,12 +383,12 @@ class UstaDefteriWidget(QWidget):
         grid.addWidget(QLabel("HAŞIL NO"), r + 2, c)
         self.cmb_hasilno = QComboBox()
         self.cmb_hasilno.setEditable(True)
-        self.cmb_hasilno.insertItem(0, "")  # ilk değer boş
+        self.cmb_hasilno.insertItem(0, "")
         grid.addWidget(self.cmb_hasilno, r + 2, c + 1)
 
         grid.addWidget(QLabel("İŞ TANIMI"), r + 3, c)
         self.cmb_is = QComboBox()
-        self.cmb_is.addItem("")  # ilk değer boş
+        self.cmb_is.addItem("")
         self.cmb_is.addItems(IS_TANIM_LIST)
         grid.addWidget(self.cmb_is, r + 3, c + 1)
 
@@ -231,34 +398,33 @@ class UstaDefteriWidget(QWidget):
 
         grid.addWidget(QLabel("İŞLEM YAPAN"), r + 5, c)
         self.cmb_usta = QComboBox()
-        self.cmb_usta.addItem("")  # ilk değer boş
-        self.cmb_usta.addItems(USTA_LIST)
+        self.cmb_usta.addItem("")
         grid.addWidget(self.cmb_usta, r + 5, c + 1)
 
         grid.addWidget(QLabel("AÇIKLAMA"), r + 7, 0)
         self.ed_aciklama = QLineEdit()
         grid.addWidget(self.ed_aciklama, r + 7, 1, 1, 4)
 
-        # Butonlar
         self.btn_bul = QPushButton("LEVENT BUL")
         self.btn_kaydet = QPushButton("KAYDET")
         self.btn_sil = QPushButton("SİL")
+        self.btn_manage_lists = QPushButton("USTA/HAŞIL YÖNET")
 
         grid.addWidget(self.btn_bul, r, 4)
         grid.addWidget(self.btn_kaydet, r + 1, 4)
         grid.addWidget(self.btn_sil, r + 2, 4)
+        grid.addWidget(self.btn_manage_lists, r + 4, 4)  # biraz ayrık
 
         self.btn_bul.clicked.connect(self._on_levent_bul)
         self.btn_kaydet.clicked.connect(self._on_save)
         self.btn_sil.clicked.connect(self._on_delete)
+        self.btn_manage_lists.clicked.connect(self._open_manage_dialog)
 
-        # vardiya saatini periyodik güncelle
         def _tick():
             from PySide6.QtCore import QTime
             self.txt_vardiya.setText(_vardiya_str(QTime.currentTime()))
 
         _tick()
-        QTimer.singleShot(0, _tick)
         timer = QTimer(self)
         timer.timeout.connect(_tick)
         timer.start(60_000)
@@ -307,12 +473,8 @@ class UstaDefteriWidget(QWidget):
 
         return box
 
-    # -------------------- DB ops -------------------------------------
-
+    # -------------------- DB ops (UstaDefteri) ------------------------
     def _insert_row(self, rec: Dict):
-        """
-        rec sözlüğündeki alanları SQL Server'daki UstaDefteri tablosuna yazar.
-        """
         colmap = {
             "tarih": "Tarih",
             "vardiya": "Vardiya",
@@ -338,16 +500,13 @@ class UstaDefteriWidget(QWidget):
             col = colmap.get(k)
             if not col:
                 continue
-
             if col == "Tarih":
-                # "dd.MM.yyyy" → "YYYY-MM-DD" string
                 try:
                     dt_val = datetime.strptime(str(v), "%d.%m.%Y").date()
                     mapped[col] = dt_val.strftime("%Y-%m-%d")
                 except Exception:
                     mapped[col] = None
             elif col == "Metre":
-                # Metre'yi float'a çevir, boş ise None
                 if v is None or str(v).strip() == "":
                     mapped[col] = None
                 else:
@@ -356,7 +515,6 @@ class UstaDefteriWidget(QWidget):
                     except Exception:
                         mapped[col] = None
             else:
-                # Diğer alanları string olarak gönder (veya None)
                 s = "" if v is None else str(v)
                 mapped[col] = s if s != "" else None
 
@@ -375,21 +533,12 @@ class UstaDefteriWidget(QWidget):
             cur.execute("DELETE FROM dbo.UstaDefteri WHERE Id = ?", (rowid,))
             c.commit()
 
-    def _select(
-        self,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        field: Optional[str] = None,
-        value: Optional[str] = None,
-    ) -> pd.DataFrame:
-        """
-        Tarih aralığı ve isteğe bağlı filtre ile SQL Server'dan kayıt çeker.
-        Tarih formatı: 'dd.MM.yyyy'
-        """
+    def _select(self, start: Optional[str] = None, end: Optional[str] = None,
+                field: Optional[str] = None, value: Optional[str] = None) -> pd.DataFrame:
         sql = """
         SELECT
             Id AS Id,
-            CONVERT(varchar(10), Tarih, 104) AS Tarih,   -- 104: dd.MM.yyyy
+            CONVERT(varchar(10), Tarih, 104) AS Tarih,
             Vardiya AS Saat,
             Tezgah AS Tezgah,
             KokTip AS Takdir,
@@ -408,7 +557,6 @@ class UstaDefteriWidget(QWidget):
         """
         params: list[object] = []
 
-        # Tarih aralığı
         if start:
             try:
                 start_date = datetime.strptime(start, "%d.%m.%Y").date()
@@ -425,7 +573,6 @@ class UstaDefteriWidget(QWidget):
             except Exception:
                 pass
 
-        # Alan bazlı filtre
         if field and value:
             col = {
                 "Tezgah": "Tezgah",
@@ -443,18 +590,13 @@ class UstaDefteriWidget(QWidget):
 
         with self._conn() as c:
             cur = c.cursor()
-            if params:
-                cur.execute(sql, tuple(params))
-            else:
-                cur.execute(sql)
+            cur.execute(sql, tuple(params)) if params else cur.execute(sql)
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
             df = pd.DataFrame.from_records(rows, columns=cols)
-
         return df
 
     def _clear_form(self):
-        """Tarih ve vardiya/saat hariç tüm alanları boşalt."""
         if self.cmb_tezgah.count():
             self.cmb_tezgah.setCurrentIndex(0)
         if self.cmb_hasilno.count():
@@ -463,22 +605,15 @@ class UstaDefteriWidget(QWidget):
             self.cmb_is.setCurrentIndex(0)
         if self.cmb_usta.count():
             self.cmb_usta.setCurrentIndex(0)
-
         for w in [
-            self.ed_koktip,
-            self.ed_hasis,
-            self.ed_levent,
-            self.ed_etiket,
-            self.ed_dokuma,
-            self.ed_metre,
-            self.ed_tip,
-            self.ed_aciklama,
+            self.ed_koktip, self.ed_hasis, self.ed_levent, self.ed_etiket,
+            self.ed_dokuma, self.ed_metre, self.ed_tip, self.ed_aciklama
         ]:
             w.clear()
 
+    # -------------------- Actions ------------------------------------
     def _on_levent_bul(self):
         self._clear_form()
-        # Levent no'yu yeni pencerede iste
         lev, ok = QInputDialog.getText(self, "Levent Bul", "Levent No girin:")
         if not ok or not lev.strip():
             return
@@ -496,29 +631,24 @@ class UstaDefteriWidget(QWidget):
             return
         row = hit.iloc[0]
 
-        # Tüm alanları doldur
         self.ed_levent.setText(_strip_trailing_dot_zero(lev))
         self.ed_koktip.setText(str(row.get("Kök Tip Kodu", "")).strip())
         self.ed_dokuma.setText(str(row.get("Üretim Sipariş No", "")).strip())
         self.ed_hasis.setText(_strip_trailing_dot_zero(row.get("Haşıl İş Emri", "")))
         self.ed_etiket.setText(_strip_trailing_dot_zero(row.get("Levent Etiket FA", "")))
 
-        # Tarak ; Örgü
         tarak = str(row.get("Tarak Grubu", "")).strip()
         orgu = str(row.get("Zemin Örgü", "")).strip()
         self.ed_tip.setText(f"{tarak};{orgu}")
 
-        # Metre (Parti Metresi)
         pm = row.get("Parti Metresi", "")
         self.ed_metre.setText("" if pd.isna(pm) else str(pm))
 
-        # Haşıl no comboya ekle + seç
         hn = str(row.get("Haşıl No", "")).strip() if "Haşıl No" in row else ""
-        if self.cmb_hasilno.findText("") == -1:
-            self.cmb_hasilno.insertItem(0, "")
-        if hn and self.cmb_hasilno.findText(hn) == -1:
-            self.cmb_hasilno.addItem(hn)
-        self.cmb_hasilno.setCurrentText(hn)
+        if hn:
+            self._ensure_lookup_value("HASIL", hn, created_by="LEVENT_BUL")
+            self._refresh_hasil_combo()
+            self.cmb_hasilno.setCurrentText(hn)
 
     def _on_save(self):
         try:
@@ -530,19 +660,21 @@ class UstaDefteriWidget(QWidget):
             levent = self.ed_levent.text().strip()
             etiket = _strip_trailing_dot_zero(self.ed_etiket.text().strip())
 
-            # Etiket benzersiz olmalı
             if self._etiket_exists(etiket):
                 QMessageBox.warning(
-                    self,
-                    "Mükerrer Etiket",
-                    f"'{etiket}' etiket numarası zaten kayıtlı. Kayıt yapılmadı.",
+                    self, "Mükerrer Etiket",
+                    f"'{etiket}' etiket numarası zaten kayıtlı. Kayıt yapılmadı."
                 )
                 return
 
             dokuma = self.ed_dokuma.text().strip()
             metre_txt = self.ed_metre.text().replace(",", ".").strip()
             metre = float(metre_txt) if metre_txt else None
+
             hasilno = self.cmb_hasilno.currentText().strip()
+            if hasilno:
+                self._ensure_lookup_value("HASIL", hasilno, created_by="SAVE")
+
             is_tanimi = self.cmb_is.currentText().strip()
             tip = self.ed_tip.text().strip()
             tarak, orgu = "", ""
@@ -551,10 +683,7 @@ class UstaDefteriWidget(QWidget):
             islem_yapan = self.cmb_usta.currentText().strip()
             aciklama = self.ed_aciklama.text().strip()
 
-            # Yapılan işlem = "Tarak ; Örgü"
-            yapilan = ""
-            if tarak or orgu:
-                yapilan = f"{tarak} ; {orgu}"
+            yapilan = f"{tarak} ; {orgu}" if (tarak or orgu) else ""
 
             rec = dict(
                 tarih=tarih,
@@ -579,6 +708,7 @@ class UstaDefteriWidget(QWidget):
             QMessageBox.information(self, "Kaydedildi", "Kayıt eklendi.")
             self._load_last_n()
             self._clear_form()
+            self._refresh_hasil_combo()
         except Exception as e:
             QMessageBox.critical(self, "Hata", f"Kayıt eklenemedi:\n{e}")
 
@@ -587,7 +717,7 @@ class UstaDefteriWidget(QWidget):
         if row < 0:
             QMessageBox.information(self, "Bilgi", "Silmek için bir satır seçin.")
             return
-        id_item = self.tbl.item(row, 0)  # Id
+        id_item = self.tbl.item(row, 0)
         if not id_item:
             return
         try:
@@ -607,16 +737,14 @@ class UstaDefteriWidget(QWidget):
         field = self.cmb_field.currentText()
         value = self.ed_value.text().strip()
         df = self._select(start, end, field if value else None, value if value else None)
-        self._raw_df = df  # hızlı bul için
+        self._raw_df = df
         _df_to_table(self.tbl, df)
 
     def _export_excel(self):
         if not hasattr(self, "_raw_df") or self._raw_df is None or self._raw_df.empty:
             QMessageBox.information(self, "Bilgi", "Önce raporu alın.")
             return
-        out, _ = QFileDialog.getSaveFileName(
-            self, "Excel'e aktar", "usta_defteri.xlsx", "Excel Files (*.xlsx)"
-        )
+        out, _ = QFileDialog.getSaveFileName(self, "Excel'e aktar", "usta_defteri.xlsx", "Excel Files (*.xlsx)")
         if not out:
             return
         df = self._raw_df.copy()
@@ -624,7 +752,6 @@ class UstaDefteriWidget(QWidget):
             df = df.drop(columns=["Id"])
         try:
             import xlsxwriter
-
             with pd.ExcelWriter(out, engine="xlsxwriter", datetime_format="dd.mm.yyyy") as xw:
                 sheet = "USTA_DEFTERI"
                 df.to_excel(xw, index=False, sheet_name=sheet)
@@ -694,7 +821,6 @@ class UstaDefteriWidget(QWidget):
             return cur.fetchone() is not None
 
     def _configure_table_look(self):
-        """Tablo için görsel/davranış ayarları (veri/işlevi değiştirmez)."""
         self.tbl.setSelectionBehavior(QTableWidget.SelectRows)
         self.tbl.setSelectionMode(QTableWidget.SingleSelection)
         self.tbl.setAlternatingRowColors(True)
@@ -737,7 +863,6 @@ class UstaDefteriWidget(QWidget):
         """)
 
     def _apply_beauty_theme(self):
-        """Genel uygulama stili (buton, alan, groupbox)."""
         if isinstance(self.layout(), QVBoxLayout):
             self.layout().setContentsMargins(12, 12, 12, 12)
             self.layout().setSpacing(10)
@@ -786,12 +911,8 @@ class UstaDefteriWidget(QWidget):
                 padding: 8px 12px;
                 font-weight: 700;
             }
-            QPushButton:hover {
-                background: #0284c7;
-            }
-            QPushButton:pressed {
-                background: #0369a1;
-            }
+            QPushButton:hover { background: #0284c7; }
+            QPushButton:pressed { background: #0369a1; }
             QPushButton:disabled {
                 background: #9ca3af;
                 color: #f9fafb;
