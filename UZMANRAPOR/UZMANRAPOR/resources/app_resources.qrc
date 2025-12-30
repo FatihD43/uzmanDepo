@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/assets">
+    <file alias="isko_logo.png">../assets/isko_logo.png</file>
+    <file alias="itema_logo.jpg">../assets/itema_logo.jpg</file>
+  </qresource>
+</RCC>

@@ -1,0 +1,495 @@
+{
+  "site": "MEKIKLI",
+  "schema": "cells-v1",
+  "global_range": [
+    601,
+    700
+  ],
+  "cells": [
+    {
+      "loom": 601,
+      "row": 5,
+      "col": 0
+    },
+    {
+      "loom": 602,
+      "row": 5,
+      "col": 1
+    },
+    {
+      "loom": 603,
+      "row": 5,
+      "col": 2
+    },
+    {
+      "loom": 604,
+      "row": 5,
+      "col": 3
+    },
+    {
+      "loom": 605,
+      "row": 5,
+      "col": 4
+    },
+    {
+      "loom": 606,
+      "row": 5,
+      "col": 5
+    },
+    {
+      "loom": 607,
+      "row": 5,
+      "col": 6
+    },
+    {
+      "loom": 608,
+      "row": 5,
+      "col": 7
+    },
+    {
+      "loom": 609,
+      "row": 4,
+      "col": 0
+    },
+    {
+      "loom": 610,
+      "row": 4,
+      "col": 1
+    },
+    {
+      "loom": 611,
+      "row": 4,
+      "col": 2
+    },
+    {
+      "loom": 612,
+      "row": 4,
+      "col": 3
+    },
+    {
+      "loom": 613,
+      "row": 4,
+      "col": 4
+    },
+    {
+      "loom": 614,
+      "row": 4,
+      "col": 5
+    },
+    {
+      "loom": 615,
+      "row": 4,
+      "col": 6
+    },
+    {
+      "loom": 616,
+      "row": 4,
+      "col": 7
+    },
+    {
+      "loom": 617,
+      "row": 3,
+      "col": 0
+    },
+    {
+      "loom": 618,
+      "row": 3,
+      "col": 1
+    },
+    {
+      "loom": 619,
+      "row": 3,
+      "col": 2
+    },
+    {
+      "loom": 620,
+      "row": 3,
+      "col": 3
+    },
+    {
+      "loom": 621,
+      "row": 3,
+      "col": 4
+    },
+    {
+      "loom": 622,
+      "row": 3,
+      "col": 5
+    },
+    {
+      "loom": 623,
+      "row": 3,
+      "col": 6
+    },
+    {
+      "loom": 624,
+      "row": 3,
+      "col": 7
+    },
+    {
+      "loom": 625,
+      "row": 2,
+      "col": 0
+    },
+    {
+      "loom": 626,
+      "row": 2,
+      "col": 1
+    },
+    {
+      "loom": 627,
+      "row": 2,
+      "col": 2
+    },
+    {
+      "loom": 628,
+      "row": 2,
+      "col": 3
+    },
+    {
+      "loom": 629,
+      "row": 2,
+      "col": 4
+    },
+    {
+      "loom": 630,
+      "row": 2,
+      "col": 5
+    },
+    {
+      "loom": 631,
+      "row": 2,
+      "col": 6
+    },
+    {
+      "loom": 632,
+      "row": 2,
+      "col": 7
+    },
+    {
+      "loom": 633,
+      "row": 1,
+      "col": 0
+    },
+    {
+      "loom": 634,
+      "row": 1,
+      "col": 1
+    },
+    {
+      "loom": 635,
+      "row": 1,
+      "col": 2
+    },
+    {
+      "loom": 636,
+      "row": 1,
+      "col": 3
+    },
+    {
+      "loom": 637,
+      "row": 1,
+      "col": 4
+    },
+    {
+      "loom": 638,
+      "row": 1,
+      "col": 5
+    },
+    {
+      "loom": 639,
+      "row": 1,
+      "col": 6
+    },
+    {
+      "loom": 640,
+      "row": 1,
+      "col": 7
+    },
+    {
+      "loom": 641,
+      "row": 0,
+      "col": 0
+    },
+    {
+      "loom": 642,
+      "row": 0,
+      "col": 1
+    },
+    {
+      "loom": 643,
+      "row": 0,
+      "col": 2
+    },
+    {
+      "loom": 644,
+      "row": 0,
+      "col": 3
+    },
+    {
+      "loom": 645,
+      "row": 0,
+      "col": 4
+    },
+    {
+      "loom": 646,
+      "row": 0,
+      "col": 5
+    },
+    {
+      "loom": 647,
+      "row": 0,
+      "col": 6
+    },
+    {
+      "loom": 648,
+      "row": 0,
+      "col": 7
+    },
+    {
+      "loom": 649,
+      "row": 13,
+      "col": 0
+    },
+    {
+      "loom": 650,
+      "row": 13,
+      "col": 1
+    },
+    {
+      "loom": 651,
+      "row": 13,
+      "col": 2
+    },
+    {
+      "loom": 652,
+      "row": 13,
+      "col": 3
+    },
+    {
+      "loom": 653,
+      "row": 13,
+      "col": 4
+    },
+    {
+      "loom": 654,
+      "row": 13,
+      "col": 5
+    },
+    {
+      "loom": 655,
+      "row": 13,
+      "col": 6
+    },
+    {
+      "loom": 656,
+      "row": 13,
+      "col": 7
+    },
+    {
+      "loom": 657,
+      "row": 12,
+      "col": 0
+    },
+    {
+      "loom": 658,
+      "row": 12,
+      "col": 1
+    },
+    {
+      "loom": 659,
+      "row": 12,
+      "col": 2
+    },
+    {
+      "loom": 660,
+      "row": 12,
+      "col": 3
+    },
+    {
+      "loom": 661,
+      "row": 12,
+      "col": 4
+    },
+    {
+      "loom": 662,
+      "row": 12,
+      "col": 5
+    },
+    {
+      "loom": 663,
+      "row": 12,
+      "col": 6
+    },
+    {
+      "loom": 664,
+      "row": 12,
+      "col": 7
+    },
+    {
+      "loom": 665,
+      "row": 11,
+      "col": 0
+    },
+    {
+      "loom": 666,
+      "row": 11,
+      "col": 1
+    },
+    {
+      "loom": 667,
+      "row": 11,
+      "col": 2
+    },
+    {
+      "loom": 668,
+      "row": 11,
+      "col": 3
+    },
+    {
+      "loom": 669,
+      "row": 11,
+      "col": 4
+    },
+    {
+      "loom": 670,
+      "row": 11,
+      "col": 5
+    },
+    {
+      "loom": 671,
+      "row": 11,
+      "col": 6
+    },
+    {
+      "loom": 672,
+      "row": 11,
+      "col": 7
+    },
+    {
+      "loom": 673,
+      "row": 10,
+      "col": 0
+    },
+    {
+      "loom": 674,
+      "row": 10,
+      "col": 1
+    },
+    {
+      "loom": 675,
+      "row": 10,
+      "col": 2
+    },
+    {
+      "loom": 676,
+      "row": 10,
+      "col": 3
+    },
+    {
+      "loom": 677,
+      "row": 10,
+      "col": 4
+    },
+    {
+      "loom": 678,
+      "row": 10,
+      "col": 5
+    },
+    {
+      "loom": 679,
+      "row": 10,
+      "col": 6
+    },
+    {
+      "loom": 680,
+      "row": 10,
+      "col": 7
+    },
+    {
+      "loom": 681,
+      "row": 9,
+      "col": 0
+    },
+    {
+      "loom": 682,
+      "row": 9,
+      "col": 1
+    },
+    {
+      "loom": 683,
+      "row": 9,
+      "col": 2
+    },
+    {
+      "loom": 684,
+      "row": 9,
+      "col": 3
+    },
+    {
+      "loom": 685,
+      "row": 9,
+      "col": 4
+    },
+    {
+      "loom": 686,
+      "row": 9,
+      "col": 5
+    },
+    {
+      "loom": 687,
+      "row": 9,
+      "col": 6
+    },
+    {
+      "loom": 688,
+      "row": 9,
+      "col": 7
+    },
+    {
+      "loom": 689,
+      "row": 8,
+      "col": 0
+    },
+    {
+      "loom": 690,
+      "row": 8,
+      "col": 1
+    },
+    {
+      "loom": 691,
+      "row": 8,
+      "col": 2
+    },
+    {
+      "loom": 692,
+      "row": 8,
+      "col": 3
+    },
+    {
+      "loom": 693,
+      "row": 8,
+      "col": 4
+    },
+    {
+      "loom": 694,
+      "row": 8,
+      "col": 5
+    },
+    {
+      "loom": 695,
+      "row": 8,
+      "col": 6
+    },
+    {
+      "loom": 696,
+      "row": 8,
+      "col": 7
+    }
+  ],
+  "dividers_h": [
+    6
+  ],
+  "dividers_v": [],
+  "notes": "MEKIKLI birebir saha yerleşimi (2 blok, 8x6)"
+}
